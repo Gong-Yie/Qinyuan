@@ -319,3 +319,64 @@ func TestPausedDoesNotClaim(t *testing.T) {
 		t.Fatal("暂停不该丢掉 open 意图")
 	}
 }
+
+// T3：暂停必须能打断"正在跑"的执行，且意图回到 open（可恢复）。
+// 这条覆盖了 07-验收测试 里最隐蔽的一类 bug：暂停后 settle 用已取消的 ctx 写库。
+func TestPauseDuringExecutionReflowsOpen(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	run, _ := newLoopbackRun(t, st, "http://127.0.0.1:1")
+	intentID, err := st.AddIntent(ctx, store.AddIntentInput{RunID: run.ID, Summary: "一条会跑很久的意图"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	providers := llm.NewFakeFactory(llm.Step{Delay: 5 * time.Second, Text: "永远等不到我"})
+	eng := newEngineFor(t, st, providers)
+	eng.Cfg.MaxDuration = 30 * time.Second
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := eng.Work(ctx, run.ID, "w1"); err != nil {
+			t.Errorf("执行失败：%v", err)
+		}
+	}()
+
+	// 等它真的进入 running（说明已经在执行）。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n, err := st.Intent(ctx, run.ID, intentID)
+		if err == nil && n.State == model.StateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("意图没有进入 running")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := eng.Pause(ctx, run.ID); err != nil {
+		t.Fatalf("暂停失败：%v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("暂停后执行没有停下来（在跑的 ctx 没被 cancel）")
+	}
+
+	n, err := st.Intent(ctx, run.ID, intentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.State != model.StateOpen {
+		t.Fatalf("任务暂停后意图应回到 open（可恢复），实际 %s", n.State)
+	}
+	got, err := st.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Task == nil || !got.Task.Paused {
+		t.Fatal("任务没有被标记为暂停")
+	}
+}

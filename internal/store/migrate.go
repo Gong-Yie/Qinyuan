@@ -4,8 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-
-	"github.com/jackc/pgx/v5"
 )
 
 //go:embed schema.sql
@@ -37,20 +35,6 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// pgx 的扩展协议不允许一次多语句，所以这里走 PgConn().Exec。
 	if _, err := conn.Conn().PgConn().Exec(ctx, schemaSQL).ReadAll(); err != nil {
 		return fmt.Errorf("执行 schema 失败：%w", err)
-	}
-	return nil
-}
-
-// migrateInSchema 在指定 schema 内跑迁移（测试隔离用）。
-func migrateInSchema(ctx context.Context, conn *pgx.Conn, schema string) error {
-	if _, err := conn.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgx.Identifier{schema}.Sanitize()); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(ctx, `SET search_path TO `+pgx.Identifier{schema}.Sanitize()); err != nil {
-		return err
-	}
-	if _, err := conn.PgConn().Exec(ctx, schemaSQL).ReadAll(); err != nil {
-		return err
 	}
 	return nil
 }

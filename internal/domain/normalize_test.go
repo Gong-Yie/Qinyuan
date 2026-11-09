@@ -96,6 +96,32 @@ func TestScopeSet(t *testing.T) {
 	}
 }
 
+func TestSplitHostPort(t *testing.T) {
+	cases := []struct {
+		in     string
+		scheme string
+		host   string
+		port   int
+	}{
+		{"example.com:8443", "https", "example.com", 8443},
+		{"Example.COM.", "http", "example.com", 80},
+		{"[2001:db8::1]:8080", "http", "2001:db8::1", 8080},
+		{"10.0.0.1", "https", "10.0.0.1", 443},
+	}
+	for _, c := range cases {
+		h, p, err := SplitHostPort(c.in, c.scheme)
+		if err != nil {
+			t.Fatalf("SplitHostPort(%q) 失败：%v", c.in, err)
+		}
+		if h != c.host || p != c.port {
+			t.Errorf("SplitHostPort(%q)=(%s,%d)，期望 (%s,%d)", c.in, h, p, c.host, c.port)
+		}
+	}
+	if _, _, err := SplitHostPort("example.com:99999", "http"); err == nil {
+		t.Error("越界端口应当报错")
+	}
+}
+
 func TestDialableIP(t *testing.T) {
 	// 这个函数在 agent 包里，这里只验证 domain 层的 IP 语义边界（回环/链路本地）。
 	for _, s := range []string{"127.0.0.1", "169.254.169.254", "::1"} {

@@ -51,6 +51,7 @@ type Engine struct {
 	paused      map[int64]bool
 	taskCancels map[int64]context.CancelCauseFunc
 	workCancels map[int64]context.CancelCauseFunc
+	workRuns    map[int64]int64
 
 	inflightMu sync.Mutex
 	inflight   map[int64]int
@@ -75,6 +76,7 @@ func New(st *store.Store, providers llm.Factory, reg *agent.Registry, cfg Config
 		paused:      map[int64]bool{},
 		taskCancels: map[int64]context.CancelCauseFunc{},
 		workCancels: map[int64]context.CancelCauseFunc{},
+		workRuns:    map[int64]int64{},
 		inflight:    map[int64]int{},
 	}
 }
@@ -127,7 +129,7 @@ func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, err
 	defer e.endInflight(runID)
 
 	workCtx, cancel := context.WithCancelCause(ctx)
-	e.registerWork(intent.ID, cancel)
+	e.registerWork(intent.ID, runID, cancel)
 	defer e.unregisterWork(intent.ID)
 
 	out, execErr := e.worker().Execute(workCtx, runID, intent.ID, owner, e.emit)
@@ -135,7 +137,12 @@ func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, err
 	cancel(nil)
 
 	if execErr != nil && out == nil {
-		out = &agent.Outcome{Reason: agent.ReasonError, Err: execErr}
+		// 如果这次失败只是"因为被取消"，那不是执行错误：不能标成 blocked。
+		if workCtx.Err() != nil || errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
+			out = &agent.Outcome{Reason: agent.ReasonCanceled}
+		} else {
+			out = &agent.Outcome{Reason: agent.ReasonError, Err: execErr}
+		}
 	}
 	state := e.settle(ctx, runID, intent.ID, out, cause)
 	e.emit(context.WithoutCancel(ctx), &model.Activity{
@@ -170,7 +177,12 @@ func (e *Engine) claimNext(ctx context.Context, runID int64, owner string) (*mod
 // settle 是九分支收尾分流的唯一实现。顺序不能改：
 // 顺序错一个，UI 上就会大面积"失败"或"未完成"。
 func (e *Engine) settle(ctx context.Context, runID, intentID int64, out *agent.Outcome, cause error) string {
-	run, err := e.Store.Run(ctx, runID)
+	// ★ 收尾必须用"不随取消而失效"的 ctx：暂停/超时正是 cancel 之后才收尾，
+	//   用原 ctx 写库会失败，意图就永远卡在 running（07 的经典错误 #2）。
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	run, err := e.Store.Run(writeCtx, runID)
 	if err != nil {
 		e.Log.Error("收尾时读 run 失败", "run", runID, "err", err)
 	}
@@ -200,7 +212,7 @@ func (e *Engine) settle(ctx context.Context, runID, intentID int64, out *agent.O
 		next = model.StateDone
 	}
 
-	ok, err := e.Store.CASIntent(ctx, runID, intentID, model.StateRunning, next)
+	ok, err := e.Store.CASIntent(writeCtx, runID, intentID, model.StateRunning, next)
 	if err != nil {
 		e.Log.Error("CAS 意图终态失败", "run", runID, "intent", intentID, "next", next, "err", err)
 		return model.StateRunning
@@ -210,7 +222,7 @@ func (e *Engine) settle(ctx context.Context, runID, intentID int64, out *agent.O
 		return model.StateRunning
 	}
 	if next == model.StateBlocked && isLLMChainExhausted(out.Err) {
-		_ = e.Store.SetBlockedReason(ctx, runID, intentID, "quota")
+		_ = e.Store.SetBlockedReason(writeCtx, runID, intentID, "quota")
 	}
 	return next
 }
@@ -256,6 +268,15 @@ func (e *Engine) Pause(ctx context.Context, runID int64) error {
 	e.mu.Lock()
 	e.paused[runID] = true
 	cancel := e.taskCancels[runID]
+	// 直接调用 Work（HTTP /work、CLI --once）时没有 taskCtx，必须能取消到在跑的 work。
+	var workCancels []context.CancelCauseFunc
+	for intentID, rid := range e.workRuns {
+		if rid == runID {
+			if c, ok := e.workCancels[intentID]; ok {
+				workCancels = append(workCancels, c)
+			}
+		}
+	}
 	e.mu.Unlock()
 
 	if err := e.Store.SetTaskPaused(ctx, runID, true); err != nil {
@@ -266,6 +287,9 @@ func (e *Engine) Pause(ctx context.Context, runID int64) error {
 	}
 	if cancel != nil {
 		cancel(ErrPausedByUser)
+	}
+	for _, c := range workCancels {
+		c(ErrPausedByUser)
 	}
 	return nil
 }
@@ -300,15 +324,17 @@ func (e *Engine) isPaused(runID int64) bool {
 	return e.paused[runID]
 }
 
-func (e *Engine) registerWork(intentID int64, cancel context.CancelCauseFunc) {
+func (e *Engine) registerWork(intentID, runID int64, cancel context.CancelCauseFunc) {
 	e.mu.Lock()
 	e.workCancels[intentID] = cancel
+	e.workRuns[intentID] = runID
 	e.mu.Unlock()
 }
 
 func (e *Engine) unregisterWork(intentID int64) {
 	e.mu.Lock()
 	delete(e.workCancels, intentID)
+	delete(e.workRuns, intentID)
 	e.mu.Unlock()
 }
 

@@ -183,7 +183,10 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	case "resume":
 		err = s.Engine.Resume(ctx, id)
 	case "stop":
-		err = s.Engine.Pause(ctx, id)
+		// 终止是一条比暂停长得多的链（屏障 → 排水 → 两阶段清理），
+		// M1 不提供半成品语义：宁可明确拒绝，也不假装"停了"。
+		writeError(w, http.StatusNotImplemented, "stop 尚未实现（M4 的删除/终止流水线）；当前请用 pause")
+		return
 	default:
 		writeError(w, http.StatusBadRequest, "action 只支持 pause/resume/stop")
 		return
