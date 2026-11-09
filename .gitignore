@@ -1,0 +1,24 @@
+# 构建产物
+*.exe
+*.exe~
+qinyuan
+/qinyuan.exe
+
+# 本地数据（含落盘的工具输出、证据）
+/data/
+
+# 便携 PostgreSQL（运行时在 %LOCALAPPDATA%\qinyuan，这里只放下载缓存）
+/.devdb/
+
+# 配置与凭据
+.env
+.env.local
+
+# 日志
+*.log
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
