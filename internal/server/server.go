@@ -178,6 +178,8 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var err error
 	switch req.Action {
+	case "start":
+		err = s.Engine.Run(ctx, id)
 	case "pause":
 		err = s.Engine.Pause(ctx, id)
 	case "resume":

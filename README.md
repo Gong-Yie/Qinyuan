@@ -2,9 +2,9 @@
 
 授权 Web 安全测试 Agent —— Go 后端 + PostgreSQL，把探索过程外化成一张**可查询、可审计、可重启**的图，让 LLM 在图上反复"规划 → 执行 → 写回"。
 
-> **当前进度：M0 + M1 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、最小 REST、CLI、端到端 demo、自动化验收都在。
-> 还没有：planner（M2）、真实模型（M2）、前端/SSE（M5）、审批门（M6）。
-> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)。
+> **当前进度：M0 + M1 + M2 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、**planner（事件唤醒 / 心跳 / add_intent / prove_goal）**、**OpenAI 兼容 provider**、超时收尾、启动恢复、最小 REST、CLI、端到端 demo、自动化验收都在。
+> 还没有：流式输出与 settlement（M4）、计划图（M3）、前端/SSE（M5）、审批门（M6）。
+> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`docs/01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)。
 
 ---
 
@@ -60,7 +60,25 @@ go run ./cmd/qinyuan serve          # HTTP API：127.0.0.1:8787
 ✓ demo 通过：范围闸门 → HTTP 探测 → 实体/事实写回 → 意图 done → 配对完整
 ```
 
-### 3. 手工走一遍
+### 3. 接真实模型（M2）
+
+```powershell
+# .env.local（不要提交）
+QINYUAN_LLM_PROVIDER=openai
+QINYUAN_LLM_BASE_URL=https://api.deepseek.com/v1   # 或 https://api.openai.com/v1
+QINYUAN_LLM_API_KEY=sk-...
+QINYUAN_LLM_MODEL=deepseek-chat
+```
+
+任何 OpenAI Chat Completions 兼容后端都行（DeepSeek / OpenAI / 自建网关 / vLLM）。
+启动日志会打印 `provider=openai model=... key=***xxxx`，不会打印完整 key。
+
+```powershell
+go run ./cmd/qinyuan run create --goal "确认示例站点的服务指纹与登录入口" --target https://example.com/
+go run ./cmd/qinyuan work --run 1        # planner + worker 一起跑，到终态退出
+```
+
+### 4. 手工走一遍
 
 ```powershell
 go run ./cmd/qinyuan run create --goal "确认示例站点的服务指纹" --target http://127.0.0.1:8080/
@@ -69,8 +87,7 @@ go run ./cmd/qinyuan work --run 1 --once
 go run ./cmd/qinyuan status --run 1
 ```
 
-### 4. 测试
-
+### 5. 测试
 ```powershell
 $env:QINYUAN_TEST_DSN="postgres://postgres@127.0.0.1:55432/qinyuan_test?sslmode=disable"
 go test ./...
@@ -89,7 +106,7 @@ go test ./internal/store/ -run TestClaimConcurrentNoDuplicates -count=20   # 并
 | GET | `/api/runs` | 任务列表（派生状态） |
 | POST | `/api/runs` | 建任务 `{goal, description, target, timeout_seconds, worker_count}` |
 | GET | `/api/runs/{id}` | 详情（含意图、目标） |
-| POST | `/api/runs/{id}/control` | `{action: pause\|resume\|stop}` |
+| POST | `/api/runs/{id}/control` | `{action: start\|pause\|resume}`（stop 尚未实现） |
 | GET | `/api/runs/{id}/intents` | 意图列表 |
 | POST | `/api/runs/{id}/intents` | 手投一条意图 |
 | GET | `/api/runs/{id}/nodes?kind=` | 按类型列节点 |
@@ -139,9 +156,9 @@ docs/00-设计定稿.md    决策、边界、偏离、验收、路线图
 
 | 里程碑 | 内容 | 出口标准 |
 |---|---|---|
-| M2 | planner（事件唤醒 / debounce / 心跳 / `add_intent` / `prove_goal`）+ 真实 provider | 目标达成自动 done；重启不丢 |
-| M3 | 计划图（plan/step + `expected_evidence`）+ 差分态势 + 覆盖度 | 5 步链只有 1 步 ready；单轮态势 token −60% |
-| M4 | 三层预算 + settlement + compaction + 删除流水线 + 完整重启恢复 | 跑 2 小时不炸；撞上限不白跑 |
+| ~~M2~~ ✅ | planner（事件唤醒 / debounce / 心跳 / `add_intent` / `prove_goal`）+ OpenAI 兼容 provider + 超时收尾 + 启动恢复 | 目标达成自动 done；重启不丢 |
+| M3 | 计划图（plan/step + `expected_evidence`）+ 差分态势 + 覆盖度 + goals 拆解 | 5 步链只有 1 步 ready；单轮态势 token −60% |
+| M4 | 流式 + 三层预算 + settlement + compaction + steer_work + 删除流水线 + 准入队列 | 跑 2 小时不炸；撞上限不白跑 |
 | M5 | activity SSE + Next.js 静态导出 + `go:embed` + 链路图 | 断网 30s 回来不重复不缺口 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | 三种 finding 分别 verified/failed/unverifiable |
 

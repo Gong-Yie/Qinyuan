@@ -269,3 +269,27 @@ SELECT n.id                                       AS id,
        n.created_at                               AS created_at
 FROM nodes n
 WHERE n.kind = 'finding';
+
+-- ---------------------------------------------------------------------------
+-- 12. 数据修复（幂等，每次启动执行）
+--     M1 建的历史 run 没有 goal 节点；M2 起每个 run 必须至少有一个目标，
+--     否则 planner 的"目标达成→任务 done"永远不成立。
+-- ---------------------------------------------------------------------------
+INSERT INTO nodes (run_id, kind, state, payload, priority, origin)
+SELECT r.id, 'goal', 'open', jsonb_build_object('text', r.goal), 0, 'seed'
+  FROM runs r
+ WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE n.run_id = r.id AND n.kind = 'goal');
+
+INSERT INTO edges (run_id, src_id, rel, dst_id)
+SELECT g.run_id, o.id, 'spawns', g.id
+  FROM nodes g
+  JOIN LATERAL (
+        SELECT id FROM nodes
+         WHERE run_id = g.run_id AND kind = 'fact' AND state = 'origin'
+         LIMIT 1
+  ) o ON TRUE
+ WHERE g.kind = 'goal' AND g.origin = 'seed'
+   AND NOT EXISTS (
+        SELECT 1 FROM edges e
+         WHERE e.run_id = g.run_id AND e.dst_id = g.id AND e.rel = 'spawns'
+   );

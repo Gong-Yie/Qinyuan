@@ -39,6 +39,40 @@ type Config struct {
 	MaxToolOutput   int           // 单次工具输出上限（字符），超过落盘
 	DefaultMaxTurns int           // worker 每次执行的回合上限
 	DefaultTimeout  time.Duration // worker 每次执行的时长上限
+
+	LLM LLMConfig
+}
+
+// LLMConfig 是模型接入配置。
+//
+// 优先级：ENV > .env.local > 默认。API Key 只从环境/文件读，
+// 不进数据库、不进日志（Summary 会打码）。
+type LLMConfig struct {
+	Provider    string // fake | openai
+	BaseURL     string
+	APIKey      string
+	Model       string
+	MaxTokens   int
+	Temperature float64
+	Timeout     time.Duration
+	MaxRetries  int
+}
+
+// Summary 是给启动日志用的一行描述（不含密钥）。
+func (l LLMConfig) Summary() string {
+	key := "unset"
+	if l.APIKey != "" {
+		key = "set(" + l.KeyHint() + ")"
+	}
+	return fmt.Sprintf("provider=%s model=%s base_url=%s key=%s", l.Provider, l.Model, l.BaseURL, key)
+}
+
+// KeyHint 只露出末 4 位，用于确认"配的是哪把 key"。
+func (l LLMConfig) KeyHint() string {
+	if len(l.APIKey) <= 4 {
+		return "***"
+	}
+	return "***" + l.APIKey[len(l.APIKey)-4:]
 }
 
 // Load 按 ENV > .env.local > 默认 的顺序装配配置。
@@ -55,6 +89,14 @@ func Load() (*Config, error) {
 		MaxToolOutput:   30000,
 		DefaultMaxTurns: 12,
 		DefaultTimeout:  10 * time.Minute,
+		LLM: LLMConfig{
+			Provider:    "fake",
+			BaseURL:     "https://api.openai.com/v1",
+			MaxTokens:   4096,
+			Temperature: 0.2,
+			Timeout:     120 * time.Second,
+			MaxRetries:  2,
+		},
 	}
 
 	dsn, origin := pick("QINYUAN_DSN", fileVals, "postgres://postgres@127.0.0.1:55432/qinyuan?sslmode=disable")
@@ -87,6 +129,39 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_TIMEOUT_SECONDS 非法：%q", v)
 		}
 		c.DefaultTimeout = time.Duration(n) * time.Second
+	}
+
+	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)
+	c.LLM.BaseURL, _ = pick("QINYUAN_LLM_BASE_URL", fileVals, c.LLM.BaseURL)
+	c.LLM.APIKey, _ = pick("QINYUAN_LLM_API_KEY", fileVals, c.LLM.APIKey)
+	c.LLM.Model, _ = pick("QINYUAN_LLM_MODEL", fileVals, c.LLM.Model)
+	if v, _ := pick("QINYUAN_LLM_MAX_TOKENS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("QINYUAN_LLM_MAX_TOKENS 非法：%q", v)
+		}
+		c.LLM.MaxTokens = n
+	}
+	if v, _ := pick("QINYUAN_LLM_TEMPERATURE", fileVals, ""); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || f > 2 {
+			return nil, fmt.Errorf("QINYUAN_LLM_TEMPERATURE 非法：%q", v)
+		}
+		c.LLM.Temperature = f
+	}
+	if v, _ := pick("QINYUAN_LLM_TIMEOUT_SECONDS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("QINYUAN_LLM_TIMEOUT_SECONDS 非法：%q", v)
+		}
+		c.LLM.Timeout = time.Duration(n) * time.Second
+	}
+	if v, _ := pick("QINYUAN_LLM_MAX_RETRIES", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 5 {
+			return nil, fmt.Errorf("QINYUAN_LLM_MAX_RETRIES 非法：%q", v)
+		}
+		c.LLM.MaxRetries = n
 	}
 
 	abs, err := filepath.Abs(c.DataDir)

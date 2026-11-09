@@ -73,6 +73,25 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 		return nil, fmt.Errorf("建 origin fact 失败：%w", err)
 	}
 
+	// M2 简化：没有独立的 goals 拆解 agent，先把用户目标种成唯一目标节点。
+	// 多目标拆解在 M3（第 0 轮 goals agent）补上，届时这里只作为兜底。
+	goalPayload, err := json.Marshal(map[string]any{"text": in.Goal})
+	if err != nil {
+		return nil, err
+	}
+	var goalID int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO nodes (run_id, kind, state, payload, priority, origin)
+		 VALUES ($1, 'goal', 'open', $2, 0, 'seed') RETURNING id`,
+		runID, goalPayload).Scan(&goalID); err != nil {
+		return nil, fmt.Errorf("建目标失败：%w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO edges (run_id, src_id, rel, dst_id) VALUES ($1,$2,'spawns',$3)
+		ON CONFLICT DO NOTHING`, runID, originID, goalID); err != nil {
+		return nil, err
+	}
+
 	for _, sc := range in.Scopes {
 		if err := insertScope(ctx, tx, runID, sc); err != nil {
 			return nil, err

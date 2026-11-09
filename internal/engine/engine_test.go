@@ -79,12 +79,13 @@ func testRegistry() *agent.Registry {
 
 func newEngineFor(t *testing.T, st *store.Store, providers llm.Factory) *Engine {
 	t.Helper()
-	return New(st, providers, testRegistry(), Config{
+	return New(st, providers, agent.NewWorkerRegistry(), agent.NewPlannerRegistry(), Config{
 		DataDir:       t.TempDir(),
 		AllowLoopback: true,
 		MaxTurns:      5,
 		MaxDuration:   30 * time.Second,
 		IdleSleep:     10 * time.Millisecond,
+		Debounce:      5 * time.Millisecond,
 	}, nil)
 }
 

@@ -35,6 +35,11 @@ type Context struct {
 	DataDir       string
 	AllowLoopback bool
 	MaxOutput     int
+
+	// Final=true 表示这一轮是收尾轮：只判定目标，不再派新意图。
+	Final bool
+	// KillWork 由编排层注入（planner 的 kill_work 用；worker 为 nil）。
+	KillWork func(intentID int64) bool
 }
 
 // Result 工具返回给模型的文本。

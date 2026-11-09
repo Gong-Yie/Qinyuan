@@ -190,3 +190,18 @@ func NewToolCall(id, name string, input any) ToolCall {
 	}
 	return ToolCall{ID: id, Name: name, Input: raw}
 }
+
+// DynamicFactory 用函数实现 provider：测试里可以读请求内容再决定响应，
+// 用来验证"planner 看到上一轮产物后再行动"这类需要上下文的链路。
+type DynamicFactory struct {
+	Fn func(ctx context.Context, req *Request) (*Response, error)
+}
+
+// For 实现 Factory（所有会话共享同一个函数）。
+func (f *DynamicFactory) For(string) Provider { return dynamicProvider{f} }
+
+type dynamicProvider struct{ f *DynamicFactory }
+
+func (p dynamicProvider) Complete(ctx context.Context, req *Request) (*Response, error) {
+	return p.f.Fn(ctx, req)
+}

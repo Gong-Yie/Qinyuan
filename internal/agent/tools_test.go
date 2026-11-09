@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -203,4 +204,57 @@ func TestEvidenceGate(t *testing.T) {
 	if !strings.Contains(findRes.Text, "record_fact") {
 		t.Fatalf("无证据的 finding 应引导去 record_fact：%s", findRes.Text)
 	}
+}
+
+// planner 的 add_intent 必须在"建意图之前"过范围闸门：
+// 越界实体既不能绑到意图上，也不能悄悄建出一个空意图。
+func TestAddIntentScopeGate(t *testing.T) {
+	rc, _ := testContext(t, []model.Scope{{Kind: "subdomain", Domain: "example.test", Source: "manual"}},
+		[]store.EntityInput{{Kind: "subdomain", Domain: "example.test", RootDomain: "example.test"}}, true, 0)
+
+	// 直接写一个范围外实体（绕过工具层，模拟"别的任务见过的资产"）。
+	outID, _, err := rc.Store.UpsertEntity(context.Background(), rc.RunID, store.EntityInput{
+		Kind: "subdomain", Domain: "evil.test", RootDomain: "evil.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewAddIntentTool()
+	before, _ := rc.Store.CountByKind(context.Background(), rc.RunID, model.KindIntent)
+	res, err := tool.Handle(context.Background(), rc, json.RawMessage(
+		`{"intents":[{"summary":"越界方向","asset_ids":[`+itoa(outID)+`]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, "不在本任务授权范围内") {
+		t.Fatalf("应当被范围闸门拒绝：%s", res.Text)
+	}
+	if n, _ := rc.Store.CountByKind(context.Background(), rc.RunID, model.KindIntent); n != before {
+		t.Fatalf("被拒绝的方向不该建出节点：before=%d after=%d", before, n)
+	}
+
+	// 范围内可以正常创建，并且自动连到 origin fact。
+	// 注意：subdomain 规则是精确匹配，所以这里用 example.test 本身（子域要用 root_domain 规则）。
+	inID, _, err := rc.Store.UpsertEntity(context.Background(), rc.RunID, store.EntityInput{
+		Kind: "subdomain", Domain: "example.test", RootDomain: "example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = tool.Handle(context.Background(), rc, json.RawMessage(
+		`{"intents":[{"summary":"范围内方向","asset_ids":[`+itoa(inID)+`]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, "error") {
+		t.Fatalf("范围内方向不该失败：%s", res.Text)
+	}
+	if n, _ := rc.Store.CountByKind(context.Background(), rc.RunID, model.KindIntent); n != before+1 {
+		t.Fatalf("应当只新增 1 条意图：before=%d after=%d", before, n)
+	}
+}
+
+func itoa(v int64) string {
+	return strconv.FormatInt(v, 10)
 }
