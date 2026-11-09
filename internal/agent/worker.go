@@ -90,7 +90,7 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 		RunDir:      runDir,
 	})
 
-	ov, err := BuildOverview(ctx, w.Store, runID)
+	ov, err := BuildOverview(ctx, w.Store, runID, false)
 	if err != nil {
 		return nil, err
 	}

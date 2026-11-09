@@ -314,3 +314,111 @@ func TestDeadlineSettlesTimeout(t *testing.T) {
 		t.Fatalf("状态 = %s，期望 timeout", got.Task.Status)
 	}
 }
+
+// M3 全链路：planner 拆步 → 挂 step_id 派意图 → 事实命中 expected_evidence 自动完成步骤
+// → planner 看到新事实后 prove_goal → 任务 done。
+func TestPlannerPlanStepChainEndToEnd(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	run, _ := newLoopbackRun(t, st, "http://127.0.0.1:1")
+
+	var mu sync.Mutex
+	calls := map[string]int{}
+	plannerFn := func(_ context.Context, req *llm.Request) (*llm.Response, error) {
+		mu.Lock()
+		n := calls[req.SessionKey]
+		calls[req.SessionKey]++
+		mu.Unlock()
+
+		switch n {
+		case 0:
+			return &llm.Response{ToolCalls: []llm.ToolCall{llm.NewToolCall("q1", "add_plan_step",
+				map[string]any{"text": "拿到首页标题", "expected_evidence": "首页标题"})},
+				Usage: llm.Usage{Input: 200, Output: 40}}, nil
+		case 1:
+			// 从上一条 tool 结果里取出刚建的 step_id，把意图挂到它上面。
+			var stepID int64
+			for _, m := range req.Messages {
+				if m.Role != llm.RoleTool {
+					continue
+				}
+				var v struct {
+					StepID int64 `json:"step_id"`
+				}
+				if json.Unmarshal([]byte(m.Text), &v) == nil && v.StepID > 0 {
+					stepID = v.StepID
+				}
+			}
+			if stepID == 0 {
+				return &llm.Response{Text: "（测试）没拿到 step_id"}, nil
+			}
+			return &llm.Response{ToolCalls: []llm.ToolCall{llm.NewToolCall("q2", "add_intent",
+				map[string]any{"intents": []map[string]any{{
+					"summary": "请求首页并记录标题", "step_id": stepID,
+				}}})}, Usage: llm.Usage{Input: 260, Output: 40}}, nil
+		default:
+			ov, ok := overviewFrom(req)
+			if !ok {
+				return &llm.Response{Text: "（测试）读不到态势"}, nil
+			}
+			var openGoal, factID int64
+			for _, g := range ov.Goals {
+				if g.State == model.StateOpen {
+					openGoal = g.ID
+				}
+			}
+			// origin fact 不能当证据：取第一条非 origin 的 confirmed 事实。
+			for _, f := range ov.Facts {
+				if f.State == model.StateConfirmed {
+					factID = f.ID
+					break
+				}
+			}
+			if openGoal == 0 || factID == 0 {
+				return &llm.Response{Text: "等 worker 产出事实。"}, nil
+			}
+			return &llm.Response{ToolCalls: []llm.ToolCall{llm.NewToolCall("q3", "prove_goal",
+				map[string]any{"goal_id": openGoal, "evidence_id": factID, "reason": "首页标题已拿到"})}}, nil
+		}
+	}
+
+	workerFake := llm.NewFakeFactory(
+		llm.Step{ToolCalls: []llm.ToolCall{llm.NewToolCall("w1", "record_fact", map[string]any{
+			"facts": []map[string]any{{
+				"summary": "已拿到首页标题：Qinyuan Demo", "evidence": "GET / → <title>Qinyuan Demo</title>",
+				"confidence": "observed",
+			}},
+		})}},
+		llm.Step{Text: "完成：已写回标题事实。"},
+	)
+	eng := New(st, routeFactory{planner: &llm.DynamicFactory{Fn: plannerFn}, worker: workerFake},
+		agent.NewWorkerRegistry(), agent.NewPlannerRegistry(), Config{
+			DataDir: t.TempDir(), AllowLoopback: true,
+			MaxTurns: 5, MaxDuration: 30 * time.Second, IdleSleep: 10 * time.Millisecond,
+			Debounce: 5 * time.Millisecond, HeartbeatFloor: 30 * time.Second,
+		}, nil)
+
+	if err := eng.Run(ctx, run.ID); err != nil {
+		t.Fatalf("启动失败：%v", err)
+	}
+	defer eng.StopTask(run.ID, ErrShutdown)
+
+	waitTaskStatus(t, st, run.ID, []string{model.TaskDone}, 20*time.Second)
+
+	pg, err := st.PlanGraph(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pg.PlanID == 0 || len(pg.Steps) != 1 {
+		t.Fatalf("计划图不完整：%+v", pg)
+	}
+	if pg.Steps[0].State != model.StateDone {
+		t.Fatalf("步骤状态 = %s，期望 done（事实应已命中 expected_evidence）", pg.Steps[0].State)
+	}
+	if pg.Steps[0].RealizedBy == 0 {
+		t.Fatal("步骤缺少 realized_by 边")
+	}
+	if !pg.Steps[0].RuleHit {
+		t.Fatal("步骤应由规则命中（satisfied_by_rule=true）")
+	}
+}

@@ -150,9 +150,19 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
    **串行链：分步派，别并行。** 强依赖链（①→②→③）本轮只派"前置已满足"的那一步；
    待它产出 fact 后，下一轮再派下一步（当前版本没有跨轮 todo 工具，靠态势与触发事件推进）。
    "同一件事"别拆两条；只有平行、互不依赖的维度才多意图并行。
+   **计划图（有就按它推进；没有就先建）**：
+   - 本任务还没有计划图、而目标又不是一句话能做完的 → 先用 add_plan_step 把战役拆成 3~8 步
+     （每步都要给 expected_evidence 与 depends_on），再只对本轮 ready_steps 里的步骤派意图；
+     不要一次把整条链并行铺开。
+   - 已有计划图 → 本轮优先从 ready_steps 里选；每个 add_intent 必须带 step_id；
+     确实要计划外探索时用 off_plan=true，并在 summary 里说明为什么计划需要修订。
+   - 事实命中某步的 expected_evidence 时该步会自动完成、下一步变 ready；规则没命中再用 mark_step_done。
+   - ready_steps 为空 = 在等依赖，本轮不派意图是正当的（这属于"等待依赖"，不是偷懒）。
+
 4. 提交：用【一次】add_intent 批量提交（最多 4 个最高价值的，不要逐条多次调）。
    - summary：一句话说清"针对什么 + 做什么 + 为什么"，不套固定分类；去重靠它与已有意图比对。
    - asset_ids：本方向要测试的目标实体 id（尽量传）。
+   - step_id：挂到哪个计划步骤（有计划图时必填；计划外探索用 off_plan=true）。
    - parent_ids：本方向由哪些上游 fact/finding 综合得出（可选）；顶层全新方向留空。
      只能填已存在的 fact/finding，不能填意图/目标/提示。
 

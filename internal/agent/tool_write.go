@@ -361,9 +361,10 @@ func handleRecordFact(ctx context.Context, rc *Context, raw json.RawMessage) (Re
 		return Errorf("%v", err), nil
 	}
 	type out struct {
-		ID      int64  `json:"id,omitempty"`
-		Summary string `json:"summary,omitempty"`
-		Error   string `json:"error,omitempty"`
+		ID             int64   `json:"id,omitempty"`
+		Summary        string  `json:"summary,omitempty"`
+		SatisfiedSteps []int64 `json:"satisfied_steps,omitempty"`
+		Error          string  `json:"error,omitempty"`
 	}
 	results := make([]out, 0, len(in.Facts))
 	for _, f := range in.Facts {
@@ -376,7 +377,15 @@ func handleRecordFact(ctx context.Context, rc *Context, raw json.RawMessage) (Re
 			results = append(results, out{Summary: f.Summary, Error: err.Error()})
 			continue
 		}
-		results = append(results, out{ID: id, Summary: f.Summary})
+		// 事实写回后立刻做"计划步骤是否被满足"的规则判定：
+		// 规则命中就直接完成该步，下一轮 planner 会看到新的 ready_steps。
+		satisfied, serr := rc.Store.SatisfyStepsByFact(ctx, rc.RunID, id, f.Summary+" "+f.Detail)
+		if serr != nil {
+			results = append(results, out{ID: id, Summary: f.Summary,
+				Error: "事实已写回，但计划步骤判定失败：" + serr.Error()})
+			continue
+		}
+		results = append(results, out{ID: id, Summary: f.Summary, SatisfiedSteps: satisfied})
 	}
 	return JSONResult(map[string]any{"results": results}), nil
 }

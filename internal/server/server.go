@@ -55,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{id}/intents", s.handleAddIntent)
 	mux.HandleFunc("GET /api/runs/{id}/activity", s.handleActivity)
 	mux.HandleFunc("GET /api/runs/{id}/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/runs/{id}/coverage", s.handleCoverage)
 	mux.HandleFunc("POST /api/runs/{id}/work", s.handleWork)
 
 	return withMiddleware(mux, s.Log)
@@ -284,12 +285,25 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ov, err := agent.BuildOverview(r.Context(), s.Store, id)
+	ov, err := agent.BuildOverview(r.Context(), s.Store, id, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, ov)
+}
+
+func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	cov, err := s.Store.Coverage(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, cov)
 }
 
 func (s *Server) handleWork(w http.ResponseWriter, r *http.Request) {

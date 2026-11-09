@@ -92,7 +92,7 @@ func (p *Planner) Plan(ctx context.Context, runID int64, triggers []Trigger, fin
 	if err != nil {
 		return nil, err
 	}
-	ov, err := BuildOverview(ctx, p.Store, runID)
+	ov, err := BuildOverview(ctx, p.Store, runID, true)
 	if err != nil {
 		return nil, err
 	}

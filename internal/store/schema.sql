@@ -293,3 +293,47 @@ SELECT g.run_id, o.id, 'spawns', g.id
         SELECT 1 FROM edges e
          WHERE e.run_id = g.run_id AND e.dst_id = g.id AND e.rel = 'spawns'
    );
+
+-- ---------------------------------------------------------------------------
+-- 13. M3：计划图（plan / step）与 satisfies / realized_by / depends_on 边
+--     约束升级：先检测再重建（PG 不支持给 CHECK 加枚举值）
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'nodes'::regclass
+             AND conname = 'ck_node_kind'
+             AND pg_get_constraintdef(oid) NOT LIKE '%step%') THEN
+    ALTER TABLE nodes DROP CONSTRAINT ck_node_kind;
+    ALTER TABLE nodes ADD CONSTRAINT ck_node_kind
+      CHECK (kind IN ('goal','intent','fact','finding','hint','digest','plan','step'));
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'nodes'::regclass
+             AND conname = 'ck_node_state'
+             AND pg_get_constraintdef(oid) NOT LIKE '%skipped%') THEN
+    ALTER TABLE nodes DROP CONSTRAINT ck_node_state;
+    ALTER TABLE nodes ADD CONSTRAINT ck_node_state CHECK (
+        (kind = 'intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
+        (kind = 'goal'    AND state IN ('open','met','abandoned')) OR
+        (kind = 'fact'    AND state IN ('confirmed','dismissed','origin')) OR
+        (kind = 'finding' AND state IN ('confirmed','dismissed')) OR
+        (kind = 'hint'    AND state IN ('active','consumed')) OR
+        (kind = 'digest'  AND state IN ('active','superseded')) OR
+        (kind = 'plan'    AND state IN ('active','done','abandoned')) OR
+        (kind = 'step'    AND state IN ('todo','ready','running','done','failed','skipped'))
+    );
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'edges'::regclass
+             AND conname = 'ck_edge_rel'
+             AND pg_get_constraintdef(oid) NOT LIKE '%satisfies%') THEN
+    ALTER TABLE edges DROP CONSTRAINT ck_edge_rel;
+    ALTER TABLE edges ADD CONSTRAINT ck_edge_rel
+      CHECK (rel IN ('spawns','derived_from','yields','proves','covers','satisfies','realized_by','depends_on'));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_steps_state ON nodes(run_id, state) WHERE kind = 'step';

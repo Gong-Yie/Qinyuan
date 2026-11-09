@@ -24,7 +24,9 @@ func NewAddIntentTool() *Tool {
 		Description: `创建一条探索方向（intent），可以一次批量提交（最多 4 条，优先批量）。
 summary 要说清"针对什么 + 做什么 + 为什么"，依赖去重靠它与已有意图比对。
 parent_ids 只能填已存在的【事实/发现】（从它们综合出这条方向）；顶层全新方向留空。
-asset_ids 填这条方向要处理的目标实体 id（尽量传）。`,
+asset_ids 填这条方向要处理的目标实体 id（尽量传）。
+step_id：把这条方向挂到计划图的某一步（有计划图时必填，除非 off_plan=true）。
+off_plan：显式声明"这是计划外探索"（会作为计划需要修订的信号）。`,
 		Schema: toolSpecJSON(`{
   "type": "object",
   "properties": {
@@ -37,7 +39,9 @@ asset_ids 填这条方向要处理的目标实体 id（尽量传）。`,
           "summary": {"type": "string", "description": "一句话方向：针对什么 + 做什么 + 为什么"},
           "asset_ids": {"type": "array", "items": {"type": "integer"}},
           "parent_ids": {"type": "array", "items": {"type": "integer"}},
-          "priority": {"type": "integer", "minimum": 0, "maximum": 10}
+          "priority": {"type": "integer", "minimum": 0, "maximum": 10},
+          "step_id": {"type": "integer", "description": "挂到哪个计划步骤"},
+          "off_plan": {"type": "boolean", "description": "计划外探索（有计划图时必须显式声明）"}
         },
         "required": ["summary"]
       }
@@ -54,6 +58,8 @@ type addIntentItem struct {
 	AssetIDs  []int64 `json:"asset_ids"`
 	ParentIDs []int64 `json:"parent_ids"`
 	Priority  int     `json:"priority"`
+	StepID    int64   `json:"step_id"`
+	OffPlan   bool    `json:"off_plan"`
 }
 
 func handleAddIntent(ctx context.Context, rc *Context, raw json.RawMessage) (Result, error) {
@@ -89,6 +95,14 @@ func handleAddIntent(ctx context.Context, rc *Context, raw json.RawMessage) (Res
 			results = append(results, result{Index: i, Summary: it.Summary, Error: err.Error()})
 			continue
 		}
+		// 有计划图时，新方向必须挂在某个步骤上；确实要计划外探索，用 off_plan 显式声明。
+		// 这是 P1-1 的 S3（强制）阶段，但保留逃生门，避免计划图僵化探索。
+		if pg, err := rc.Store.PlanGraph(ctx, rc.RunID); err == nil && len(pg.Steps) > 0 &&
+			it.StepID == 0 && !it.OffPlan {
+			results = append(results, result{Index: i, Summary: it.Summary,
+				Error: "本任务已有计划图：请把这条方向挂到某个步骤（step_id），或用 off_plan=true 显式说明这是计划外探索"})
+			continue
+		}
 		id, err := rc.Store.AddIntent(ctx, store.AddIntentInput{
 			RunID: rc.RunID, Summary: it.Summary, AssetIDs: it.AssetIDs,
 			ParentIDs: it.ParentIDs, Priority: it.Priority, Origin: "planner",
@@ -96,6 +110,13 @@ func handleAddIntent(ctx context.Context, rc *Context, raw json.RawMessage) (Res
 		if err != nil {
 			results = append(results, result{Index: i, Summary: it.Summary, Error: err.Error()})
 			continue
+		}
+		if it.StepID > 0 {
+			if err := rc.Store.LinkStepIntent(ctx, rc.RunID, it.StepID, id); err != nil {
+				results = append(results, result{Index: i, ID: id, Summary: it.Summary,
+					Error: "意图已建，但挂到步骤失败：" + err.Error()})
+				continue
+			}
 		}
 		results = append(results, result{Index: i, ID: id, Summary: it.Summary})
 	}
@@ -265,6 +286,9 @@ func NewPlannerRegistry() *Registry {
 		NewListFindingsTool(),
 		NewNodeDetailTool(),
 		NewGetWorkerOutputTool(),
+		NewAddPlanStepTool(),
+		NewListPlanTool(),
+		NewMarkStepDoneTool(),
 		NewAddIntentTool(),
 		NewProveGoalTool(),
 		NewKillWorkTool(),

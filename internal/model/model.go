@@ -18,6 +18,8 @@ const (
 	KindFinding = "finding"
 	KindHint    = "hint"
 	KindDigest  = "digest"
+	KindPlan    = "plan"
+	KindStep    = "step"
 )
 
 // 节点 state。不同 kind 的合法集合不同，由数据库 CHECK 兜底。
@@ -38,6 +40,12 @@ const (
 	StateActive     = "active"
 	StateConsumed   = "consumed"
 	StateSuperseded = "superseded"
+
+	// 计划步骤状态（M3）：ready 由代码按依赖判定，不由模型判定。
+	StateTodo    = "todo"
+	StateReady   = "ready"
+	StateSkipped = "skipped"
+	StateFailed  = "failed"
 )
 
 // 边关系。src = 上游/父，dst = 下游/子（全项目统一，不许反）。

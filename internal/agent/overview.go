@@ -23,36 +23,49 @@ type Brief struct {
 	Parents    []int64 `json:"parents,omitempty"`
 }
 
+// PlanBrief 是计划图给模型看的摘要：只给标题 + ready 步骤 + 计数。
+type PlanBrief struct {
+	PlanID     int64   `json:"plan_id"`
+	Title      string  `json:"title"`
+	Strategy   string  `json:"strategy,omitempty"`
+	Revision   int     `json:"revision"`
+	StepsDone  int     `json:"steps_done"`
+	StepsTotal int     `json:"steps_total"`
+	Ready      []Brief `json:"ready_steps"`
+}
+
 // Overview 是 planner 每轮预取、worker 开局看一眼的态势。
 //
 // 三条渲染规则（01-数据模型 §10.5）：
 //  1. 每个列表都有硬上限 + 总数（键名自解释：recent_done vs done_total）；
 //  2. 摘要 ≤160 字，详情一律 node_detail 另取；
-//  3. worker 版本会删掉 coverage —— 覆盖度是规划者信号，给执行者会诱导它去追未覆盖点。
+//  3. worker 版本不带 coverage —— 覆盖度是规划者信号，给执行者会诱导它去追未覆盖点。
 type Overview struct {
-	RunID         int64    `json:"run_id"`
-	Goal          string   `json:"goal"`
-	Status        string   `json:"status"`
-	Round         int64    `json:"round"`
-	Goals         []Brief  `json:"goals"`
-	Hints         []Brief  `json:"hints"`
-	Open          []Brief  `json:"open_intents"`
-	Running       []Brief  `json:"running_intents"`
-	RecentDone    []Brief  `json:"recent_done"`
-	DoneTotal     int      `json:"done_total"`
-	Frontier      int      `json:"frontier_open"`
-	Facts         []Brief  `json:"recent_facts"`
-	FactsTotal    int      `json:"facts_total"`
-	Findings      []Brief  `json:"finding_list"`
-	FindingsTotal int      `json:"findings_total"`
-	Entities      int      `json:"entities"`
-	Scopes        []string `json:"scopes"`
-	GeneratedAt   int64    `json:"generated_at"`
+	RunID         int64           `json:"run_id"`
+	Goal          string          `json:"goal"`
+	Status        string          `json:"status"`
+	Round         int64           `json:"round"`
+	Goals         []Brief         `json:"goals"`
+	Hints         []Brief         `json:"hints"`
+	Plan          *PlanBrief      `json:"plan,omitempty"`
+	Open          []Brief         `json:"open_intents"`
+	Running       []Brief         `json:"running_intents"`
+	RecentDone    []Brief         `json:"recent_done"`
+	DoneTotal     int             `json:"done_total"`
+	Frontier      int             `json:"frontier_open"`
+	Facts         []Brief         `json:"recent_facts"`
+	FactsTotal    int             `json:"facts_total"`
+	Findings      []Brief         `json:"finding_list"`
+	FindingsTotal int             `json:"findings_total"`
+	Entities      int             `json:"entities"`
+	Scopes        []string        `json:"scopes"`
+	Coverage      *store.Coverage `json:"coverage,omitempty"`
+	GeneratedAt   int64           `json:"generated_at"`
 }
 
-// BuildOverview 组装态势。这就是 planner 每轮"预取"的那份 JSON：
+// BuildOverview 组装态势。withCoverage=false（worker）时不带覆盖度。
 // 预取的返回与 overview 工具的返回必须是同一份代码，才能保证"看到的"和"调到的"一致。
-func BuildOverview(ctx context.Context, st *store.Store, runID int64) (*Overview, error) {
+func BuildOverview(ctx context.Context, st *store.Store, runID int64, withCoverage bool) (*Overview, error) {
 	run, err := st.Run(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -140,7 +153,41 @@ func BuildOverview(ctx context.Context, st *store.Store, runID int64) (*Overview
 		return nil, err
 	}
 	ov.Entities = len(ents)
+
+	// 计划图摘要：只给标题、计数与 ready 步骤 —— planner 的"本轮只能从 ready 里选"靠它。
+	if pg, err := st.PlanGraph(ctx, runID); err == nil && pg.PlanID > 0 {
+		pb := &PlanBrief{PlanID: pg.PlanID, Title: pg.Title, Strategy: pg.Strategy, Revision: pg.Revision}
+		for _, s := range pg.Steps {
+			pb.StepsTotal++
+			if s.State == model.StateDone {
+				pb.StepsDone++
+			}
+			if s.State == model.StateReady && len(pb.Ready) < 20 {
+				pb.Ready = append(pb.Ready, Brief{
+					ID: s.ID, Kind: "step", State: s.State,
+					Summary: model.TrimSummary(stepSummary(s), 160), Priority: s.Priority,
+				})
+			}
+		}
+		ov.Plan = pb
+	}
+
+	if withCoverage {
+		cov, err := st.Coverage(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		ov.Coverage = cov
+	}
 	return ov, nil
+}
+
+// stepSummary 把"做什么 + 期望证据"拼成一行，供列表展示。
+func stepSummary(s store.StepView) string {
+	if s.Expected == "" {
+		return s.Text
+	}
+	return s.Text + "（期望证据：" + s.Expected + "）"
 }
 
 func briefs(ctx context.Context, st *store.Store, runID int64, kind string, limit int, fromIntent map[int64]int64) ([]Brief, error) {

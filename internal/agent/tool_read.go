@@ -79,7 +79,7 @@ func NewOverviewTool() *Tool {
 		ReadOnly:    true,
 		Schema:      toolSpecJSON(`{"type":"object","properties":{}}`),
 		Handle: func(ctx context.Context, rc *Context, _ json.RawMessage) (Result, error) {
-			ov, err := BuildOverview(ctx, rc.Store, rc.RunID)
+			ov, err := BuildOverview(ctx, rc.Store, rc.RunID, true)
 			if err != nil {
 				return Errorf("读态势失败：%v", err), nil
 			}
