@@ -367,6 +367,7 @@ func NewPlannerRegistry() *Registry {
 		NewSteerWorkTool(),
 		NewListAttachmentsTool(),
 		NewReadAttachmentTool(),
+		NewArchiveListTool(),
 	)
 }
 
@@ -384,6 +385,8 @@ func NewWorkerRegistry() *Registry {
 		NewListFindingsTool(),
 		NewListAttachmentsTool(),
 		NewReadAttachmentTool(),
+		NewArchiveListTool(),
+		NewArchiveReadTool(),
 	)
 }
 

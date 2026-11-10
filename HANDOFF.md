@@ -52,6 +52,8 @@
 | M10 | 控制台「新建任务」表单 + `can_start`（created/queued 可一键启动，修复"建了但不动"）（`docs/16 §6`） | ✅ |
 | M11 | 新建任务改成**抽屉**（表单移出 `#view`）+ 输入中不轮询 + 列表结构签名跳过（修"输入框老被刷新"）（`docs/16 §7`） | ✅ |
 | M12 | 任务附件：上传（内容寻址）+ 清单注入态势/goals + 只读工具 `list_attachments`/`read_attachment`（`docs/18`） | ✅ |
+| M13 | CTF1 复盘的五处修复：空流分类 / 偶发失败重排队 / 失败可见 / 计划图判定收紧 / prompt 能力面（`docs/19`） | ✅ |
+| M14 | 附件归档与 strings：`archive_list`（可穿透嵌套）/ `archive_read`（text/strings/hex）/ `read_attachment mode=strings`（`docs/20`） | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -179,7 +181,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 16-M8-控制台与DTO迁移.md  战役页 / 运维页 / 时间线 Tab / 批量审批 / DTO 迁 model
 │   ├── 17-M9-鉴权.md           令牌/角色 / Cookie 会话 / CSRF / 登录限速 / 启动自检
 │   ├── 18-M12-附件.md          上传 / 内容寻址 / 清单注入 / 只读工具 / 不可信输入
-│   └── 19-CTF1-复盘.md         真实 CTF 暴露的五个缺陷（空流 / 计划图假完成 / 能力面）
+│   ├── 19-CTF1-复盘.md         真实 CTF 暴露的五个缺陷（空流 / 计划图假完成 / 能力面）
+│   └── 20-M14-归档与字符串工具.md  受控 zip 清单 / 嵌套下钻 / strings（不落盘）
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）

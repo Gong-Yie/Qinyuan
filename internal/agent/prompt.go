@@ -102,7 +102,10 @@ func BuildWorkerSystem(in WorkerPromptInput) string {
 		"，你只拿到 head + 路径（路径只用于引用，不能再读）；\n")
 	b.WriteString("- 附件只能用 list_attachments / read_attachment 按字节读：文本回正文，二进制/压缩包回 hexdump；\n")
 	b.WriteString("  不要试图在推理里逐字节解析几万字节的 hexdump —— 那会烧光输出预算且几乎无法还原结构；\n")
-	b.WriteString("- 需要「解包 / 反编译 / 跑脚本」才能拿到的结论，本任务目前做不到：改为黑盒探测，并在 fact 里点明这个缺口。\n")
+	b.WriteString("- 材料是 zip/war/jar：用 archive_list 看条目（path 可穿透嵌套归档），archive_read 读文本条目；\n")
+	b.WriteString("  .class / jar 这类二进制用 archive_read mode=strings 提取常量池字符串（路由与关键字都在里面）；\n")
+	b.WriteString("- 仍然没有 shell：不能执行脚本、不能反编译（javap/cfr），也不能把文件写到磁盘；\n")
+	b.WriteString("  真需要「跑起来看」的结论，写进 fact 点明缺口，交给规划者换打法。\n")
 
 	if in.TrafficEnabled {
 		b.WriteString("\n【流量工具】本任务开启了流量录制（每次 http_request 都会留下请求/响应，" +
@@ -216,8 +219,9 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
 	// 这种执行者根本做不到的活（run #41 连派 5 次，见 docs/19）。
 	b.WriteString("\n【能力边界（写意图前必须据此裁剪）】\n")
 	b.WriteString("- worker 没有 shell：不能解压、不能执行脚本、不能反编译、不能写文件；\n")
-	b.WriteString("- 附件只能用 list_attachments / read_attachment 按字节读（二进制给 hexdump，单次 ≤64KB）；\n")
-	b.WriteString("  题目材料是 zip/war/jar 时，不要派「解包 + 反编译」：改为黑盒探测，或让用户上传已解压的文本；\n")
+	b.WriteString("- 附件本身按字节读；zip/war/jar 用 archive_list 看条目（可穿透嵌套）、archive_read 读条目、\n")
+	b.WriteString("  mode=strings 提取 .class 常量池 —— 先自己列一次清单，再派**精确**的意图（读哪个文件、找哪个字符串）；\n")
+	b.WriteString("  不要派「解包到工作目录 / 跑反编译」：执行者没有 shell，那类意图只会空跑；\n")
 	b.WriteString("- 不要写「先把中间产物写到工作目录」这类计划：模型写不了文件，执行者只会空跑。\n")
 	return b.String()
 }
