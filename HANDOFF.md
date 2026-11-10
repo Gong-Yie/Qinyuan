@@ -41,11 +41,13 @@
 | M4a | settlement 收尾轮 + compaction/micro-compact + `steer_work` 实时纠偏 | ✅ |
 | M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列（FIFO）+ 完整启动恢复 | ✅ |
 | M4c | 流式输出（SSE）+ committed 边界（未提交才可重试） | ✅ |
-| M5 | activity SSE + 手写 SPA 静态导出 + `go:embed`（**不含链路图**，见 `docs/11 §6`） | ✅ |
+| M5a | activity SSE + 仪表盘（手写 SPA + `go:embed`，IA 按 ARTEX；**不含链路图**，见 `docs/11 §6`） | ✅ |
+| M5b | 链路图 + 覆盖图（自写分层布局 / 力导向 + 折叠） | ❌ 未做 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
 
-> 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 三栏仪表盘（目标/计划/意图｜活动带｜成本/覆盖/事实），
-> 数据来自任务级 SSE（`/api/runs/{id}/activity/stream`）。链路图与覆盖图还没做。
+> 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
+> （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
+> 会话走任务级 SSE（`/api/runs/{id}/activity/stream`）。链路图与覆盖图还没做。
 
 ---
 
@@ -197,7 +199,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。96 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。97 个测试。
 
 ---
 
@@ -541,7 +543,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（96 个，`*_test.go`）
+## 10. 测试（97 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -780,13 +782,18 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     刷新没变"，很容易误判成样式规则没生效（本轮就这么被坑过一次）。
 41. **IP 目标的覆盖度按 `run_scope.value` 匹配，不是 `net`**：`runplan` 给 IP 字面量只写
     `value`，`net` 为空；只按网段匹配会让这类任务的覆盖率永远是 0/0。
+42. **`<span>` 当进度条不生效**：`display:inline` 的宽高被忽略，条形图会全是空的。
+    进度条/柱状图的 track 与 fill 都要显式 `display:block`。
+43. **`health.llm_configured` 别再硬编码**：曾经写死 `false`，设置页永远显示"模型未配置"。
+    现在按 provider 类型判断（`*llm.FakeFactory` = 未配置）。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
-<待提交> M5：activity SSE + 控制台（手写 SPA + go:embed，docs/11）
+<待提交> M5b 前置：仪表盘重做（按 ARTEX 的 IA）+ 发现/资产页 + /stats（docs/11）
+5963694 M5a：activity SSE + 控制台（手写 SPA + go:embed）
 30fcc50 P4 观测：每节点用量 + /api/runs/{id}/tokens（docs/10）
 f51beba P4：意图级预算 + http 两档返回（docs/09）
 566e2c6 修复：种子 URL（runs.seeds）+ 意图终态回收步骤 + 判据匹配重写 + confidence 边界（docs/07、08）
@@ -804,16 +811,17 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-P0–P4 已提交（`566e2c6`、`f51beba`、`30fcc50`）。**当前工作区未提交的是 M5 控制台**（先 review 再提交）：
-`docs/11` + `internal/server/{broadcast.go,activity_stream.go,webui.go,webui/*,stream_test.go}` +
-`internal/store/{activity.go,coverage.go,coverage_ip_test.go}` + `internal/engine/engine.go`（Publish 钩子）。
+P0–P4 与 M5a 已提交（`566e2c6`、`f51beba`、`30fcc50`、`5963694`、`32c4d23`）。
+**当前工作区未提交的是"仪表盘重做"**（第一版是仪器面板风格，被判定不是仪表盘，按 ARTEX 的
+信息架构重做）：`internal/server/webui/*`（整体重写）+ `internal/server/{dashboard.go,server.go}`
++ `internal/store/{stats.go,listing.go,dashboard_test.go}` + `docs/11`、`docs/screenshots/*`。
 
-M5 之后 `docs/00–11` 是设计与验收记录；本文是状态快照。
+`docs/00–11` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 96 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 97 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

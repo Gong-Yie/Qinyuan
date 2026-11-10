@@ -17,6 +17,7 @@ import (
 
 	"qinyuan/internal/agent"
 	"qinyuan/internal/engine"
+	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
 	"qinyuan/internal/runplan"
 	"qinyuan/internal/store"
@@ -32,6 +33,8 @@ type Server struct {
 	Log    *slog.Logger
 	// Bus 是 SSE 的广播源；引擎落库成功后把活动推到这里。
 	Bus *Bus
+	// LLMConfigured 表示接的是真实 provider（false = fake，任务不会真的调模型）。
+	LLMConfigured bool
 }
 
 // New 构造。
@@ -44,7 +47,13 @@ func New(st *store.Store, eng *engine.Engine, log *slog.Logger) *Server {
 		// 单一发射点：engine.emit 落库成功后发布；失败不发布（客户端会用 since 从 DB 补齐）。
 		eng.Publish = bus.Publish
 	}
-	return &Server{Store: st, Engine: eng, Log: log, Bus: bus}
+	real := false
+	if eng != nil && eng.Providers != nil {
+		if _, isFake := eng.Providers.(*llm.FakeFactory); !isFake {
+			real = true
+		}
+	}
+	return &Server{Store: st, Engine: eng, Log: log, Bus: bus, LLMConfigured: real}
 }
 
 // Handler 返回路由表。
@@ -54,6 +63,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/findings", s.handleFindings)
+	mux.HandleFunc("GET /api/assets", s.handleEntities)
 	mux.HandleFunc("GET /api/runs", s.handleListRuns)
 	mux.HandleFunc("POST /api/runs", s.handleCreateRun)
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
@@ -123,7 +135,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"ready":   err == nil,
 		"db":      err == nil,
 		// M1 只有假 provider；真实模型在 M2 接入。
-		"llm_configured": false,
+		"llm_configured": s.LLMConfigured,
 	})
 }
 

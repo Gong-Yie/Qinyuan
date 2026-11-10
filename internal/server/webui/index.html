@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,147 +7,69 @@
 <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-<div class="app">
+<div class="shell">
 
-  <header class="header">
+  <aside class="sidebar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">
-        <i></i><i></i><i></i>
-      </span>
-      <span class="brand-name">钦原</span>
-      <span class="brand-sub">QINYUAN · 授权安全测试</span>
+      <div class="brand-logo" aria-hidden="true">钦</div>
+      <div class="brand-text">
+        <strong>钦原</strong>
+        <span>授权安全测试</span>
+      </div>
     </div>
 
-    <div class="header-mid">
-      <label class="field">
-        <span class="field-label">任务</span>
-        <select id="run-select" aria-label="选择任务"></select>
-      </label>
-      <span id="run-status" class="pill pill-idle"><span class="dot"></span><span class="pill-text">未选择</span></span>
-    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-group">
+        <div class="nav-label">总览</div>
+        <a class="nav-item" href="#/dashboard" data-match="#/dashboard">
+          <span class="nav-icon">◫</span><span>仪表盘</span>
+        </a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">工作区</div>
+        <a class="nav-item" href="#/runs" data-match="#/runs">
+          <span class="nav-icon">≡</span><span>任务</span><span class="nav-badge" id="badge-runs"></span>
+        </a>
+        <a class="nav-item" href="#/findings" data-match="#/findings">
+          <span class="nav-icon">◈</span><span>发现</span><span class="nav-badge" id="badge-findings"></span>
+        </a>
+        <a class="nav-item" href="#/assets" data-match="#/assets">
+          <span class="nav-icon">◇</span><span>资产</span><span class="nav-badge" id="badge-assets"></span>
+        </a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">系统</div>
+        <a class="nav-item" href="#/settings" data-match="#/settings">
+          <span class="nav-icon">⚙</span><span>设置</span>
+        </a>
+      </div>
+    </nav>
 
-    <div class="header-actions">
-      <button id="btn-pause" class="btn" type="button">暂停</button>
-      <button id="btn-resume" class="btn" type="button">恢复</button>
-      <button id="btn-refresh" class="btn btn-ghost" type="button" title="重新拉取态势">刷新</button>
+    <div class="sidebar-foot">
+      <span id="health-dot" class="dot"></span>
+      <span id="health-text">连接中…</span>
+    </div>
+  </aside>
+
+  <header class="topbar">
+    <div class="crumb">
+      <h1 id="page-title">仪表盘</h1>
+      <span id="page-sub" class="crumb-sub"></span>
+    </div>
+    <div class="topbar-actions">
+      <span id="engine-chip" class="chip chip-quiet" title="模型与引擎">—</span>
+      <button class="btn btn-ghost" id="btn-theme" type="button" title="切换主题">◐</button>
+      <button class="btn" id="btn-refresh" type="button">刷新</button>
     </div>
   </header>
 
-  <section class="ribbon" aria-label="关键指标">
-    <div class="metric">
-      <span class="metric-label">目标达成</span>
-      <span class="metric-value"><b id="m-goals">–</b><small id="m-goals-total">/–</small></span>
-    </div>
-    <div class="metric">
-      <span class="metric-label">有效输入</span>
-      <span class="metric-value"><b id="m-eff">–</b><small>tok</small></span>
-    </div>
-    <div class="metric">
-      <span class="metric-label">缓存命中</span>
-      <span class="metric-value"><b id="m-cache">–</b><small>%</small></span>
-    </div>
-    <div class="metric">
-      <span class="metric-label">事实 / 发现</span>
-      <span class="metric-value"><b id="m-facts">–</b><small id="m-findings">/–</small></span>
-    </div>
-    <div class="metric">
-      <span class="metric-label">覆盖度</span>
-      <span class="metric-value"><b id="m-cov">–</b><small>%</small></span>
-    </div>
-    <div class="spend" aria-label="每个节点的有效花费">
-      <div class="spend-head">
-        <span class="metric-label">花费条 · 每节点有效输入</span>
-        <span id="spend-total" class="spend-total">–</span>
-      </div>
-      <div id="spend-bars" class="spend-bars"></div>
-    </div>
-  </section>
-
-  <main class="body">
-
-    <aside class="rail rail-left" aria-label="目标与计划">
-      <section class="block">
-        <h2 class="block-title">目标 <span id="goal-count" class="block-count">0</span></h2>
-        <ol id="goals" class="list goals"></ol>
-        <p class="empty" id="goals-empty">还没有目标。第 0 轮拆解完成后出现在这里。</p>
-      </section>
-
-      <section class="block">
-        <h2 class="block-title">计划 <span id="plan-count" class="block-count">0</span></h2>
-        <div class="plan-bar" id="plan-bar" hidden>
-          <div class="plan-bar-fill" id="plan-bar-fill"></div>
-        </div>
-        <ol id="steps" class="list steps"></ol>
-        <p class="empty" id="steps-empty">还没有计划图。planner 会在第一轮拆步。</p>
-      </section>
-
-      <section class="block">
-        <h2 class="block-title">在跑意图 <span id="intent-count" class="block-count">0</span></h2>
-        <ol id="intents" class="list intents"></ol>
-        <p class="empty" id="intents-empty">当前没有在跑的意图。</p>
-      </section>
-
-      <section class="block block-quiet">
-        <h2 class="block-title">范围 / 约束</h2>
-        <ul id="scopes" class="list plain"></ul>
-      </section>
-    </aside>
-
-    <section class="center">
-      <div class="tape-head">
-        <h2 class="tape-title">活动带</h2>
-        <div class="filters" role="group" aria-label="过滤活动">
-          <button class="chip is-on" data-filter="all" type="button">全部</button>
-          <button class="chip" data-filter="plan" type="button">规划</button>
-          <button class="chip" data-filter="work" type="button">执行</button>
-          <button class="chip" data-filter="system" type="button">系统</button>
-        </div>
-        <span id="tape-count" class="tape-count">0 条</span>
-      </div>
-      <div id="tape" class="tape" aria-live="polite"></div>
-      <p class="empty tape-empty" id="tape-empty">还没有活动。选一个任务，或新建一个。</p>
-      <button id="to-bottom" class="to-bottom" type="button" hidden>回到最新 ↓</button>
-    </section>
-
-    <aside class="rail rail-right" aria-label="成本与覆盖">
-      <section class="block">
-        <h2 class="block-title">成本 · 按节点</h2>
-        <table class="cost-table">
-          <thead>
-            <tr><th scope="col">节点</th><th scope="col">有效</th><th scope="col">输出</th></tr>
-          </thead>
-          <tbody id="cost-rows"></tbody>
-        </table>
-        <p class="empty" id="cost-empty">还没有用量记录。</p>
-        <p class="hint" id="cost-hint">有效输入 = 输入 − 缓存命中；比名义值更接近真实成本。</p>
-      </section>
-
-      <section class="block">
-        <h2 class="block-title">覆盖度</h2>
-        <div class="donut-wrap">
-          <svg id="donut" viewBox="0 0 120 120" class="donut" role="img" aria-label="覆盖度">
-            <circle cx="60" cy="60" r="48" class="donut-track"></circle>
-            <circle id="donut-fill" cx="60" cy="60" r="48" class="donut-fill"></circle>
-          </svg>
-          <div class="donut-caption">
-            <b id="cov-pct">–</b>
-            <span id="cov-detail">未登记范围</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="block block-quiet">
-        <h2 class="block-title">最近事实</h2>
-        <ol id="facts" class="list facts"></ol>
-      </section>
-    </aside>
-  </main>
+  <main class="view" id="view"></main>
 </div>
 
 <div id="drawer" class="drawer" hidden>
   <div class="drawer-head">
-    <span id="drawer-title" class="drawer-title">活动详情</span>
-    <button id="drawer-close" class="btn btn-ghost" type="button">关闭</button>
+    <strong id="drawer-title">详情</strong>
+    <button class="btn btn-ghost" id="drawer-close" type="button">关闭</button>
   </div>
   <pre id="drawer-body" class="drawer-body"></pre>
 </div>
