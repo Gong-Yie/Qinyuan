@@ -358,6 +358,8 @@ func NewPlannerRegistry() *Registry {
 func NewWorkerRegistry() *Registry {
 	return NewRegistry(
 		NewHTTPTool(),
+		NewTrafficSearchTool(),
+		NewTrafficGetTool(),
 		NewInsertAssetsTool(),
 		NewRecordFactTool(),
 		NewReportFindingTool(),

@@ -99,7 +99,11 @@ func BuildWorkerSystem(in WorkerPromptInput) string {
 	b.WriteString(" —— 不要写 /tmp、不要用其它绝对路径。\n")
 
 	if in.TrafficEnabled {
-		b.WriteString("\n【流量工具】本任务开启了流量录制：先查已录流量，不要重复请求同一 URL。\n")
+		b.WriteString("\n【流量工具】本任务开启了流量录制（每次 http_request 都会留下请求/响应，" +
+			"返回里有 traffic_id）：\n" +
+			"- 发请求前先 traffic_search（按 host/路径/正文子串）看有没有打过、返回过什么；\n" +
+			"- 要原文用 traffic_get(id)，大正文按 offset 分页；\n" +
+			"- report_finding 时把 traffic_ids 传进去，漏洞证据就绑定到那次真实交换上。\n")
 	}
 	return b.String()
 }

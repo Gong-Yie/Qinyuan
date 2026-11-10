@@ -114,6 +114,8 @@ type httpOutput struct {
 	FinalURL    string            `json:"final_url"`
 	Truncated   bool              `json:"truncated"`
 	RequestLine string            `json:"request_line"`
+	// TrafficID 是这次交换在流量库里的 id（0 = 没录上）；report_finding 可以引用它当证据。
+	TrafficID int64 `json:"traffic_id,omitempty"`
 }
 
 // httpInlineBodyBytes 是响应体默认回给模型的字节上限（完整内容落盘，带指针）。
@@ -207,6 +209,12 @@ func handleHTTPRequest(ctx context.Context, rc *Context, raw json.RawMessage) (R
 	start := time.Now()
 	resp, err := httpClientFor(rc.AllowLoopback).Do(req)
 	if err != nil {
+		// 失败也是一次可复核的观察：录一条 status=0 + error（证据里能看到"打不通"）。
+		recordTraffic(ctx, rc, trafficRecord{
+			Method: method, URL: norm, ReqHeaders: in.Headers, ReqBody: []byte(in.Body),
+			DurationMS: int(time.Since(start).Milliseconds()),
+			Err:        err.Error(), ContentType: "error",
+		})
 		return Errorf("请求失败（%s %s）：%v", method, norm, err), nil
 	}
 	defer resp.Body.Close()
@@ -246,5 +254,12 @@ func handleHTTPRequest(ctx context.Context, rc *Context, raw json.RawMessage) (R
 		Truncated:   truncated,
 		RequestLine: method + " " + norm,
 	}
+	out.TrafficID = recordTraffic(ctx, rc, trafficRecord{
+		Method: method, URL: out.FinalURL, Status: resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		ReqHeaders:  in.Headers, RespHeaders: headers,
+		ReqBody: []byte(in.Body), RespBody: body,
+		DurationMS: int(elapsed.Milliseconds()),
+	})
 	return JSONResult(out), nil
 }

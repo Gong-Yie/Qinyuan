@@ -35,6 +35,9 @@ type Context struct {
 	DataDir       string
 	AllowLoopback bool
 	MaxOutput     int
+	// ToolUseID 是"当前正在执行的这一次工具调用"的 id（worker 每次调用前设置）。
+	// 流量录制用它把交换和模型那次 tool_use 对上。
+	ToolUseID string
 
 	// Final=true 表示这一轮是收尾轮：只判定目标，不再派新意图。
 	Final bool

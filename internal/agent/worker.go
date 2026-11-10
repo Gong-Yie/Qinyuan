@@ -98,12 +98,13 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 
 	runDir := fmt.Sprintf("%s/runs/%d", w.DataDir, runID)
 	system := BuildWorkerSystem(WorkerPromptInput{
-		Run:         run,
-		Intent:      intent,
-		Entities:    ents,
-		Constraints: constraints,
-		Scopes:      scopeSet.Describe(),
-		RunDir:      runDir,
+		Run:            run,
+		Intent:         intent,
+		Entities:       ents,
+		Constraints:    constraints,
+		Scopes:         scopeSet.Describe(),
+		RunDir:         runDir,
+		TrafficEnabled: true,
 	})
 
 	ov, err := BuildOverview(ctx, w.Store, runID, false)
@@ -301,7 +302,9 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 				}
 			}
 
+			rc.ToolUseID = tc.ID
 			res := w.Registry.Call(execCtx, rc, tc.Name, tc.Input)
+			rc.ToolUseID = ""
 			if !res.IsError {
 				switch tc.Name {
 				case "record_fact":

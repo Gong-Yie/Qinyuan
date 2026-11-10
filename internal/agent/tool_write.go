@@ -395,13 +395,14 @@ func handleRecordFact(ctx context.Context, rc *Context, raw json.RawMessage) (Re
 // ---------- report_finding ----------
 
 type findingInput struct {
-	VulnClass string  `json:"vulnclass"`
-	Severity  string  `json:"severity"`
-	Name      string  `json:"name"`
-	Summary   string  `json:"summary"`
-	Evidence  string  `json:"evidence"`
-	IntentID  int64   `json:"intent_id"`
-	AssetIDs  []int64 `json:"asset_ids"`
+	VulnClass  string  `json:"vulnclass"`
+	Severity   string  `json:"severity"`
+	Name       string  `json:"name"`
+	Summary    string  `json:"summary"`
+	Evidence   string  `json:"evidence"`
+	IntentID   int64   `json:"intent_id"`
+	AssetIDs   []int64 `json:"asset_ids"`
+	TrafficIDs []int64 `json:"traffic_ids"`
 }
 
 // NewReportFindingTool 上报已确认漏洞。
@@ -420,7 +421,8 @@ func NewReportFindingTool() *Tool {
     "summary": {"type": "string", "description": "一句话说明影响面"},
     "evidence": {"type": "string", "description": "可复现证据：完整请求 + 关键响应"},
     "intent_id": {"type": "integer"},
-    "asset_ids": {"type": "array", "items": {"type": "integer"}}
+    "asset_ids": {"type": "array", "items": {"type": "integer"}},
+    "traffic_ids": {"type": "array", "items": {"type": "integer"}, "description": "把这几条已录交换绑成证据（http_request 返回的 traffic_id）"}
   },
   "required": ["name", "summary", "evidence"]
 }`),
@@ -447,10 +449,17 @@ func handleReportFinding(ctx context.Context, rc *Context, raw json.RawMessage) 
 	if err != nil {
 		return Errorf("%v", err), nil
 	}
+	bound := 0
+	if len(in.TrafficIDs) > 0 {
+		if n, berr := rc.Store.BindFindingTraffic(ctx, rc.RunID, id, in.TrafficIDs); berr == nil {
+			bound = n
+		}
+	}
 	return JSONResult(map[string]any{
-		"node_id":    id,
-		"finding_id": id, // findings 是视图，两个 id 同源（见 docs/00-设计定稿.md）
-		"status":     "confirmed",
+		"node_id":       id,
+		"finding_id":    id, // findings 是视图，两个 id 同源（见 docs/00-设计定稿.md）
+		"status":        "confirmed",
+		"traffic_bound": bound,
 	}), nil
 }
 

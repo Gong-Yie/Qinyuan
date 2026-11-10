@@ -407,3 +407,85 @@ DO $$ BEGIN
       (0,   '', '', 'allow', '默认策略：放行（显式存在，便于审计"为什么放行"）');
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- M6b：流量录制（在唯一出网点 http_request 里录，不架 MITM）
+--
+-- 为什么不是代理：worker 的工具面里没有任意命令执行，所有目标流量都由本进程的
+-- http_request 产生。在工具里录能拿到 intent 归属（代理做不到），也不需要 CA。
+-- 正文：≤8KB 内联（可搜），更大落内容寻址文件，只留 sha + 预览。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS traffic_exchanges (
+    id           BIGSERIAL PRIMARY KEY,
+    run_id       BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    intent_id    BIGINT,
+    tool_use_id  TEXT NOT NULL DEFAULT '',
+    ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    method       TEXT NOT NULL DEFAULT 'GET',
+    url          TEXT NOT NULL,
+    url_template TEXT NOT NULL DEFAULT '',
+    status       INT NOT NULL DEFAULT 0,
+    content_type TEXT NOT NULL DEFAULT '',
+    req_len      INT NOT NULL DEFAULT 0,
+    resp_len     INT NOT NULL DEFAULT 0,
+    duration_ms  INT NOT NULL DEFAULT 0,
+    req_headers  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    resp_headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    req_body     TEXT NOT NULL DEFAULT '',      -- 预览（≤8KB）
+    resp_body    TEXT NOT NULL DEFAULT '',
+    req_sha      TEXT NOT NULL DEFAULT '',
+    resp_sha     TEXT NOT NULL DEFAULT '',
+    req_path     TEXT NOT NULL DEFAULT '',      -- 相对 dataDir；空 = 未落盘
+    resp_path    TEXT NOT NULL DEFAULT '',
+    is_binary    BOOLEAN NOT NULL DEFAULT false,
+    truncated    BOOLEAN NOT NULL DEFAULT false,
+    error        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_run ON traffic_exchanges(run_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_traffic_run_ts ON traffic_exchanges(run_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_traffic_run_host ON traffic_exchanges(run_id, url_template);
+
+-- 证据绑定：绑定时把预览快照下来，删除流量不影响证据（与 ARTEX 的 evidence 同思路）。
+CREATE TABLE IF NOT EXISTS finding_traffic (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    finding_id  BIGINT NOT NULL,
+    exchange_id BIGINT,                        -- 允许为空：流量删了，绑定还在
+    method      TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    status      INT NOT NULL DEFAULT 0,
+    req_sha     TEXT NOT NULL DEFAULT '',
+    resp_sha    TEXT NOT NULL DEFAULT '',
+    req_preview TEXT NOT NULL DEFAULT '',
+    resp_preview TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_traffic ON finding_traffic(run_id, finding_id);
+
+-- 全文检索：有 pg_trgm 就建 GIN（子串可搜、中文可用），没有就跳过（退化成 ILIKE）。
+--
+-- 两个坑：① 扩展装在 public，而测试 schema 的 search_path 里没有 public →
+-- 操作符类要显式写 public.gin_trgm_ops；② 没权限装扩展时不能让迁移整体失败。
+DO $$
+DECLARE
+  stmt text;
+BEGIN
+  BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+  FOREACH stmt IN ARRAY ARRAY[
+    'CREATE INDEX IF NOT EXISTS idx_traffic_resp_trgm ON traffic_exchanges USING gin (resp_body public.gin_trgm_ops)',
+    'CREATE INDEX IF NOT EXISTS idx_traffic_req_trgm ON traffic_exchanges USING gin (req_body public.gin_trgm_ops)',
+    'CREATE INDEX IF NOT EXISTS idx_traffic_resp_trgm ON traffic_exchanges USING gin (resp_body gin_trgm_ops)',
+    'CREATE INDEX IF NOT EXISTS idx_traffic_req_trgm ON traffic_exchanges USING gin (req_body gin_trgm_ops)'
+  ] LOOP
+    BEGIN
+      EXECUTE stmt;
+    EXCEPTION WHEN OTHERS THEN
+      NULL; -- 这一种写法不可用就试下一种；都不行就退化成 ILIKE
+    END;
+  END LOOP;
+END $$;
+

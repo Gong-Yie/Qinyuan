@@ -409,7 +409,7 @@ async function renderRun() {
   setPage(`任务 #${id}`, run.goal);
 
   const tabs = [
-    ['overview', '概览'], ['sessions', '会话'], ['graph', '链路'],
+    ['overview', '概览'], ['sessions', '会话'], ['traffic', '流量'], ['graph', '链路'],
     ['plan', '计划'], ['cost', '成本'], ['coverage', '覆盖'], ['covgraph', '覆盖图'],
   ];
   $('view').innerHTML = `
@@ -479,6 +479,7 @@ async function drawTab(id, tab) {
   if (!body) return;
   if (tab === 'overview') return drawOverview(id, body);
   if (tab === 'sessions') return drawSessions(id, body);
+  if (tab === 'traffic') return drawTraffic(id, body);
   if (tab === 'graph') return drawGraph(id, body);
   if (tab === 'plan') return drawPlan(id, body);
   if (tab === 'cost') return drawCost(id, body);
@@ -487,6 +488,67 @@ async function drawTab(id, tab) {
 }
 
 /* ── 链路图 / 覆盖图 ────────────────────────────────── */
+
+/* ── 流量 ────────────────────────────────────────────── */
+
+async function drawTraffic(id, body) {
+  const q = S.trafficQ || '';
+  const data = await api(`/api/runs/${id}/traffic?limit=50${q ? '&q=' + encodeURIComponent(q) : ''}`);
+  const items = data.items || [];
+  const sig = `${items.length}:${items[0] ? items[0].id : 0}:${q}`;
+  if (S.trafficSig === sig && $('traffic-body')) return;
+  S.trafficSig = sig;
+
+  body.innerHTML = `
+    <div class="card-body" style="padding:0">
+      <div class="toolbar" style="padding:12px 16px 0">
+        <input class="search" id="traffic-q" placeholder="正文子串（响应/请求体）…" value="${esc(q)}" />
+        <button class="btn" id="traffic-search">搜索</button>
+        <button class="btn btn-ghost" id="traffic-clear">清空</button>
+        <span class="spacer"></span>
+        <span class="muted">${items.length} 条 · 录制在 http_request 内完成（带 intent 归属）</span>
+      </div>
+      <div id="traffic-body">
+        ${items.length ? `<table class="table">
+          <thead><tr>
+            <th class="num">#</th><th>方法</th><th>URL</th><th class="num">状态</th>
+            <th class="num">长度</th><th class="num">耗时</th><th class="num">意图</th><th>时间</th>
+          </tr></thead>
+          <tbody>${items.map((t) => `<tr class="is-clickable" data-traffic="${t.id}">
+            <td class="mono">${t.id}</td>
+            <td class="mono">${esc(t.method)}</td>
+            <td class="goal-cell"><span class="mono">${esc(t.url)}</span></td>
+            <td class="num">${t.status || (t.error ? '错误' : '—')}</td>
+            <td class="num">${fmtInt(t.resp_len)}</td>
+            <td class="num">${t.duration_ms}ms</td>
+            <td class="num">${t.intent_id ? '#' + t.intent_id : '—'}</td>
+            <td class="muted">${fmtTime(t.ts)}</td>
+          </tr>`).join('')}</tbody>
+        </table>` : empty('还没有流量', 'worker 每次 http_request 都会在这里留一条（含请求/响应与 intent 归属）。')}
+      </div>
+    </div>`;
+
+  const doSearch = () => {
+    S.trafficQ = ($('traffic-q').value || '').trim();
+    S.trafficSig = '';
+    drawTraffic(id, body);
+  };
+  $('traffic-search').addEventListener('click', doSearch);
+  $('traffic-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+  $('traffic-clear').addEventListener('click', () => {
+    S.trafficQ = '';
+    S.trafficSig = '';
+    drawTraffic(id, body);
+  });
+  document.querySelectorAll('[data-traffic]').forEach((row) => {
+    row.addEventListener('click', async () => {
+      try {
+        const d = await api(`/api/runs/${id}/traffic/${row.dataset.traffic}`);
+        openDrawerRaw(`流量 #${d.id} · ${d.method} ${d.url}`, JSON.stringify(d, null, 2));
+      } catch (e) { toast('读取失败：' + e.message); }
+    });
+  });
+}
 
 async function drawGraph(id, body) {
   const data = await api(`/api/runs/${id}/graph`);
