@@ -5,6 +5,7 @@
 > **当前进度：M0 + M1 + M2 + M3a 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、planner（事件唤醒 / 心跳 / add_intent / prove_goal）、OpenAI 兼容 provider、超时收尾、启动恢复、**计划图（step 依赖 + 规则化 done）**、**覆盖度**、最小 REST、CLI、端到端 demo、自动化验收都在。
 > 还没有：流式输出与 settlement（M4）、goals 拆解与差分态势（M3.5）、前端/SSE（M5）、审批门（M6）。
 > 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)。
+> **新接手（人或 AI）请先读 [`HANDOFF.md`](HANDOFF.md)**：环境、状态机、已修缺陷、扩展指南都在那里。
 
 ---
 
