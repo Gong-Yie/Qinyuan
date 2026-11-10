@@ -139,6 +139,15 @@ func (f *FakeFactory) For(sessionKey string) Provider {
 	return s
 }
 
+// CallCount 读某个会话被调用过几次（带锁：引擎在后台跑时测试也能安全读）。
+//
+// 直接用 f.Calls[key] 读会和 fakeSession.Complete 的写入构成数据竞争（-race 会抓到）。
+func (f *FakeFactory) CallCount(sessionKey string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.Calls[sessionKey]
+}
+
 func (s *fakeSession) Complete(ctx context.Context, req *Request) (*Response, error) {
 	s.f.mu.Lock()
 	idx := s.next

@@ -55,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{id}/intents", s.handleAddIntent)
 	mux.HandleFunc("GET /api/runs/{id}/activity", s.handleActivity)
 	mux.HandleFunc("GET /api/runs/{id}/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/runs/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/runs/{id}/coverage", s.handleCoverage)
 	mux.HandleFunc("POST /api/runs/{id}/work", s.handleWork)
 
@@ -293,6 +294,45 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ov)
 }
 
+// handleEvents 是差分态势的读口（P1-2）：返回 (since, 当前版本] 内的变化。
+//
+// planner 内部用的是同一份 store.DeltaSince；这里暴露出来是为了排障与控制台
+// （"这一轮到底发生了什么"不该只能靠猜 prompt）。
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	since, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("since")), 10, 64)
+	d, err := s.Store.DeltaSince(r.Context(), id, since, intQuery(r, "limit", 200))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nodes := make([]map[string]any, 0, len(d.Nodes))
+	for _, n := range d.Nodes {
+		nodes = append(nodes, map[string]any{
+			"id": n.ID, "kind": n.Kind, "state": n.State, "rev": n.Rev,
+			"priority": n.Priority, "summary": model.TrimSummary(n.Summary(), 160),
+			"payload": json.RawMessage(n.Payload),
+		})
+	}
+	edges := make([]map[string]any, 0, len(d.Edges))
+	for _, e := range d.Edges {
+		edges = append(edges, map[string]any{
+			"src": e.SrcID, "rel": e.Rel, "dst": e.DstID, "rev": e.Rev,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from": d.From, "to": d.To, "total": d.Total, "truncated": d.Truncated,
+		"nodes": nodes, "edges": edges,
+	})
+}
+
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
 	if !ok {
@@ -343,6 +383,7 @@ func runDTO(ctx context.Context, st *store.Store, run *model.Run) map[string]any
 		out["queued"] = run.Task.Queued
 		out["worker_count"] = run.Task.WorkerCount
 		out["timeout_seconds"] = run.Task.TimeoutSeconds
+		out["goals_at"] = run.Task.GoalsAt
 	}
 	return out
 }

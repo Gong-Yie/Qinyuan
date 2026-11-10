@@ -88,6 +88,29 @@ func NewOverviewTool() *Tool {
 	}
 }
 
+// NewRefreshOverviewTool 是 P1-2 的逃生门：当模型觉得"增量视图不够、判断不踏实"时，
+// 可以要一份全量态势。它会同时把下一轮也标成全量（模型显然在重新校准认知）。
+func NewRefreshOverviewTool() *Tool {
+	return &Tool{
+		Name: "refresh_overview",
+		Description: `要一份**全量**态势（比平时收到的增量视图完整得多，也更贵）。
+只在"增量视图不足以判断、或怀疑自己漏掉了更早的重要事实"时用；拿到后请立刻据此决策，
+不要为了省思考而反复刷新。刷新后下一轮也会自动给全量。`,
+		ReadOnly: true,
+		Schema:   toolSpecJSON(`{"type":"object","properties":{}}`),
+		Handle: func(ctx context.Context, rc *Context, _ json.RawMessage) (Result, error) {
+			ov, err := BuildOverview(ctx, rc.Store, rc.RunID, true)
+			if err != nil {
+				return Errorf("读全量态势失败：%v", err), nil
+			}
+			if rc.RefreshRequested != nil {
+				*rc.RefreshRequested = true
+			}
+			return JSONResult(ov), nil
+		},
+	}
+}
+
 // NewListFindingsTool 让 worker 也能看全任务已确认的漏洞（避免重复上报）。
 func NewListFindingsTool() *Tool {
 	return &Tool{

@@ -42,6 +42,11 @@ type Config struct {
 	HeartbeatFloor   time.Duration // 心跳下限（规格：≥600s）
 	SettleDrainGrace time.Duration // 超时收尾等待在跑 worker 的上限
 	FinalPlanTimeout time.Duration // 收尾轮独立 ctx 的超时
+
+	// M3.5：第 0 轮目标拆解 + 差分态势。
+	GoalsMaxTurns    int // 拆解 agent 的回合上限（默认 8）
+	PlannerFullEvery int // 每 K 轮给一次全量态势（默认 20）
+	DeltaLimit       int // 单轮增量最多多少条变化（默认 200）
 }
 
 type runRuntime struct {
@@ -61,6 +66,7 @@ type Engine struct {
 	Log             *slog.Logger
 	planner         *agent.Planner
 	plannerMaxTurns int
+	goals           *agent.GoalDecomposer
 
 	mu          sync.Mutex
 	paused      map[int64]bool
@@ -125,6 +131,15 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 	e.planner = &agent.Planner{
 		Store: st, Providers: providers, Registry: plannerTools,
 		DataDir: cfg.DataDir, MaxOutput: cfg.MaxOutput, MaxTurns: e.plannerMaxTurns, Logger: log,
+		FullSnapshotEvery: cfg.PlannerFullEvery, DeltaLimit: cfg.DeltaLimit,
+	}
+	if cfg.GoalsMaxTurns <= 0 {
+		cfg.GoalsMaxTurns = 8
+	}
+	e.Cfg.GoalsMaxTurns = cfg.GoalsMaxTurns
+	e.goals = &agent.GoalDecomposer{
+		Store: st, Providers: providers, Registry: agent.NewGoalsRegistry(),
+		DataDir: cfg.DataDir, MaxOutput: cfg.MaxOutput, MaxTurns: cfg.GoalsMaxTurns, Logger: log,
 	}
 	return e
 }
@@ -421,6 +436,13 @@ func (e *Engine) planRound(ctx context.Context, runID int64, final bool) bool {
 		return false // 闸门 4
 	}
 
+	// 第 0 轮：目标拆解（只跑一次）。
+	// 必须排在 gate 6（goalless）之前：拆解还没跑时 goal 是 CreateRun 种的 seed 目标，
+	// 如果先判 goalless 就会把"还没拆解"误判成"目标都已达成"。
+	if !final && !e.ensureGoals(ctx, runID, run) {
+		return false
+	}
+
 	if !final {
 		open, err := e.Store.HasOpenGoal(ctx, runID)
 		if err != nil {
@@ -466,7 +488,7 @@ func (e *Engine) planRound(ctx context.Context, runID int64, final bool) bool {
 
 	triggers := e.drainTriggers(runID)
 	e.beginLLMCall(runID)
-	res, err := e.planner.Plan(ctx, runID, triggers, final, e.KillWork, e.emit)
+	res, err := e.planner.PlanRound(ctx, runID, triggers, agent.PlanOptions{Final: final}, e.KillWork, e.emit)
 	e.endLLMCall(runID)
 
 	if err != nil {
@@ -476,7 +498,8 @@ func (e *Engine) planRound(ctx context.Context, runID int64, final bool) bool {
 		return ctx.Err() == nil
 	}
 	e.Log.Info("[planner] 本轮结果", "run", runID, "triggers", len(triggers),
-		"intents", res.Intents, "tool_calls", res.ToolCalls, "met", res.Met)
+		"intents", res.Intents, "tool_calls", res.ToolCalls, "met", res.Met,
+		"situation", res.Situation, "changes", res.Changes, "prompt_bytes", res.PromptBytes)
 	if res.Met {
 		if ok, err := e.Store.CASRunTaskStatus(ctx, runID, []string{model.TaskRunning, model.TaskCreated, model.TaskPaused}, model.TaskDone); err == nil && ok {
 			e.emit(context.WithoutCancel(ctx), &model.Activity{
@@ -497,6 +520,64 @@ func (e *Engine) nextRound(ctx context.Context, runID int64) (int64, error) {
 		`UPDATE runs SET round_no = round_no + 1, updated_at=now() WHERE id=$1 RETURNING round_no`,
 		runID).Scan(&round)
 	return round, err
+}
+
+// ensureGoals 跑第 0 轮目标拆解（只跑一次）。返回 false 表示循环该退出（ctx 取消/暂停）。
+//
+// 失败语义：拆解报错**不写** goals_at，下一轮会重试；此期间 CreateRun 种下的 seed
+// 目标仍在，planner 照常工作 —— 拆解是增强，不是前置条件。
+func (e *Engine) ensureGoals(ctx context.Context, runID int64, run *model.Run) bool {
+	if run.Task == nil || run.Task.GoalsAt > 0 || e.goals == nil {
+		return true
+	}
+	if !e.beginInflightOp(runID) {
+		return false
+	}
+	defer e.endInflightOp(runID)
+
+	if err := e.Store.StampFirstRun(ctx, runID, run.Task.TimeoutSeconds); err != nil {
+		e.Log.Warn("[goals] 盖 first_run 失败", "run", runID, "err", err)
+	}
+	_ = e.Store.TouchRun(ctx, runID)
+	e.emit(ctx, &model.Activity{
+		RunID: runID, Worker: "goals", Kind: model.ActRound,
+		Summary: "第 0 轮目标拆解",
+	})
+
+	e.beginLLMCall(runID)
+	res, err := e.goals.Decompose(ctx, runID, e.emit)
+	e.endLLMCall(runID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		e.Log.Error("[goals] 目标拆解失败（沿用 seed 目标，下一轮重试）", "run", runID, "err", err)
+		e.emit(context.WithoutCancel(ctx), &model.Activity{
+			RunID: runID, Worker: "system", Kind: model.ActSystem,
+			Summary: "目标拆解失败，先沿用原始目标继续（下一轮会重试）",
+			Detail:  err.Error(),
+		})
+		return true
+	}
+
+	ok, err := e.Store.MarkGoalsDecomposed(ctx, runID)
+	if err != nil {
+		e.Log.Warn("[goals] 写拆解标记失败（下轮会重复拆解）", "run", runID, "err", err)
+	} else if !ok {
+		e.Log.Info("[goals] 拆解标记已被别的路径写入，跳过", "run", runID)
+	}
+	e.emit(context.WithoutCancel(ctx), &model.Activity{
+		RunID: runID, Worker: "system", Kind: model.ActSystem,
+		Summary: fmt.Sprintf("目标拆解完成：%d 条目标、%d 条约束、%d 条范围",
+			res.Goals, res.Constraints, res.Scopes),
+		Metadata: map[string]any{
+			"goals": res.Goals, "constraints": res.Constraints, "scopes": res.Scopes,
+		},
+	})
+	e.Log.Info("[goals] 目标拆解完成", "run", runID, "goals", res.Goals,
+		"constraints", res.Constraints, "scopes", res.Scopes)
+	_ = e.Store.TouchRun(ctx, runID)
+	return true
 }
 
 // ---------- worker 循环 ----------

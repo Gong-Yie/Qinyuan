@@ -14,7 +14,7 @@ import (
 
 const nodeColumns = `id, run_id, kind, state, payload, priority,
 	COALESCE(owner,''), COALESCE(origin,''), COALESCE(blocked_reason,''),
-	content_version, cold_since_round, completed_at, created_at, updated_at`
+	content_version, cold_since_round, rev, completed_at, created_at, updated_at`
 
 func scanNode(row pgx.Row) (*model.Node, error) {
 	var n model.Node
@@ -22,7 +22,7 @@ func scanNode(row pgx.Row) (*model.Node, error) {
 	var cold *int64
 	var completed *time.Time
 	err := row.Scan(&n.ID, &n.RunID, &n.Kind, &n.State, &payload, &n.Priority,
-		&n.Owner, &n.Origin, &n.BlockedReason, &n.ContentVersion, &cold, &completed,
+		&n.Owner, &n.Origin, &n.BlockedReason, &n.ContentVersion, &cold, &n.Rev, &completed,
 		&n.CreatedAt, &n.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -144,8 +144,17 @@ func (s *Store) AddIntent(ctx context.Context, in AddIntentInput) (int64, error)
 		}
 	}
 
-	if err := bumpVersion(ctx, tx, in.RunID); err != nil {
+	rev, err := bumpVersion(ctx, tx, in.RunID)
+	if err != nil {
 		return 0, err
+	}
+	if err := stampNodes(ctx, tx, in.RunID, rev, intentID); err != nil {
+		return 0, err
+	}
+	for _, pid := range parents {
+		if err := stampEdge(ctx, tx, in.RunID, rev, pid, model.RelDerivedFrom, intentID); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
@@ -178,20 +187,48 @@ func (s *Store) Frontier(ctx context.Context, runID int64, limit int) ([]*model.
 }
 
 // ClaimIntent 领取一条意图：CAS，RowsAffected==1 才算抢到。
+//
+// 写在一个事务里，赢了才分配版本号并打戳 —— 失败的 CAS 不该浪费版本，
+// 更不该让增量里出现一条"其实没发生"的变化。
 func (s *Store) ClaimIntent(ctx context.Context, runID, intentID int64, owner string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE nodes SET state='running', owner=$3, updated_at=now()
 		 WHERE run_id=$1 AND id=$2 AND kind='intent' AND state='open'`,
 		runID, intentID, owner)
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return false, err
+	}
+	if err := stampNodes(ctx, tx, runID, rev, intentID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // CASIntent 意图状态迁移（带 expected）。返回 false = 冲突，调用方不得覆盖。
 func (s *Store) CASIntent(ctx context.Context, runID, intentID int64, expected, next string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE nodes
 		   SET state=$4,
 		       owner=CASE WHEN $4='open' THEN NULL ELSE owner END,
@@ -202,14 +239,46 @@ func (s *Store) CASIntent(ctx context.Context, runID, intentID int64, expected, 
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return false, err
+	}
+	if err := stampNodes(ctx, tx, runID, rev, intentID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetBlockedReason 给 blocked 的意图加原因（quota / 网络 …）。
 func (s *Store) SetBlockedReason(ctx context.Context, runID, intentID int64, reason string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE nodes SET blocked_reason=$3, updated_at=now() WHERE run_id=$1 AND id=$2`, runID, intentID, reason)
-	return err
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	tag, err := tx.Exec(ctx,
+		`UPDATE nodes SET blocked_reason=$3, updated_at=now() WHERE run_id=$1 AND id=$2`,
+		runID, intentID, reason)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // 目标不存在：不是一次变化，不值得分配版本
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if err := stampNodes(ctx, tx, runID, rev, intentID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Intent 读一条意图。
@@ -434,8 +503,17 @@ func (s *Store) addKnowledge(ctx context.Context, in knowledgeInput) (int64, err
 		}
 	}
 
-	if err := bumpVersion(ctx, tx, in.RunID); err != nil {
+	rev, err := bumpVersion(ctx, tx, in.RunID)
+	if err != nil {
 		return 0, err
+	}
+	if err := stampNodes(ctx, tx, in.RunID, rev, nodeID); err != nil {
+		return 0, err
+	}
+	if in.IntentID > 0 {
+		if err := stampEdge(ctx, tx, in.RunID, rev, in.IntentID, model.RelYields, nodeID); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
@@ -444,17 +522,39 @@ func (s *Store) addKnowledge(ctx context.Context, in knowledgeInput) (int64, err
 }
 
 // Link 建一条边（重复忽略）。
+//
+// 注意：它自己分配版本并打戳，所以业务代码要么用它（边+版本一起成），
+// 要么在自己的事务里显式 stampEdge —— 否则这条边不会出现在增量里。
 func (s *Store) Link(ctx context.Context, runID, src, dst int64, rel string) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO edges (run_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)
 		ON CONFLICT DO NOTHING`, runID, src, rel, dst)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // 已存在：不是一次"变化"
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if err := stampEdge(ctx, tx, runID, rev, src, rel, dst); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Edges 取一个 run 的全部边（图算法在应用层做）。
 func (s *Store) Edges(ctx context.Context, runID int64) ([]model.Edge, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT run_id, src_id, rel, dst_id FROM edges WHERE run_id=$1`, runID)
+		`SELECT run_id, src_id, rel, dst_id, rev FROM edges WHERE run_id=$1`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -462,15 +562,10 @@ func (s *Store) Edges(ctx context.Context, runID int64) ([]model.Edge, error) {
 	var out []model.Edge
 	for rows.Next() {
 		var e model.Edge
-		if err := rows.Scan(&e.RunID, &e.SrcID, &e.Rel, &e.DstID); err != nil {
+		if err := rows.Scan(&e.RunID, &e.SrcID, &e.Rel, &e.DstID, &e.Rev); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
-}
-
-func bumpVersion(ctx context.Context, q querier, runID int64) error {
-	_, err := q.Exec(ctx, `UPDATE runs SET version = version + 1 WHERE id=$1`, runID)
-	return err
 }

@@ -40,6 +40,9 @@ type Context struct {
 	Final bool
 	// KillWork 由编排层注入（planner 的 kill_work 用；worker 为 nil）。
 	KillWork func(intentID int64) bool
+	// RefreshRequested 由 refresh_overview 置位：下一轮 planner 重新给全量态势。
+	// planner 为 nil（worker 没有这个工具）。
+	RefreshRequested *bool
 }
 
 // Result 工具返回给模型的文本。

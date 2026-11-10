@@ -282,6 +282,7 @@ func NewKillWorkTool() *Tool {
 func NewPlannerRegistry() *Registry {
 	return NewRegistry(
 		NewOverviewTool(),
+		NewRefreshOverviewTool(),
 		NewListFactsTool(),
 		NewListFindingsTool(),
 		NewNodeDetailTool(),

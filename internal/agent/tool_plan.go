@@ -35,10 +35,10 @@ depends_on 填前置步骤 id（可空）；有依赖的步骤在依赖完成前
 				return Errorf("收尾轮不再扩展计划。"), nil
 			}
 			var in struct {
-				Text       string  `json:"text"`
-				Expected   string  `json:"expected_evidence"`
-				DependsOn  []int64 `json:"depends_on"`
-				Priority   int     `json:"priority"`
+				Text      string  `json:"text"`
+				Expected  string  `json:"expected_evidence"`
+				DependsOn []int64 `json:"depends_on"`
+				Priority  int     `json:"priority"`
 			}
 			if err := json.Unmarshal(raw, &in); err != nil {
 				return Errorf("参数解析失败：%v", err), nil

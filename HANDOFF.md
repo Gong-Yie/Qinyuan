@@ -4,17 +4,20 @@
 > §11（已修缺陷）和 §14（常见坑）是**最省时间的两节**——里面每一条都是真实踩过的。
 > 如果你只想知道"能不能跑"，直接看 §2 的复制粘贴命令。
 >
-> 文档时间点：M3a 完成、`-race` 打通之后。代码以 `git log` 为准，不以本文为准。
+> 文档时间点：M3.5 完成（目标拆解 + 差分态势）、`-race` 全绿之后。代码以 `git log` 为准，不以本文为准。
 
 ---
 
-## 0. 给接手 AI 的五条纪律
+## 0. 给接手 AI 的六条纪律
 
 1. **不要重写架构**。当前的包划分、CAS 队列、单写者、状态机位置都是刻意的，理由见 §4/§5。
 2. **状态只能在 DB 里**。内存 map 只是"活着的进程状态"，丢了必须能从 DB 重建（唯一例外见 §14.7）。
 3. **所有状态迁移走 CAS**（带 expected），禁止"读出来判断再写回去"。
 4. **边界靠工具面，不靠 prompt 说教**。worker 拿不到 `add_intent`/`prove_goal`，这比写十句"你别越界"有效。
-5. **动手前先问**。项目所有者在 M3 结束时明确要求"停一轮等 review"；新功能（M3.5/M4…）必须先确认。
+5. **动手前先问**。项目所有者在 M3 结束时明确要求"停一轮等 review"；新功能（M4…）必须先确认。
+6. **新增写路径必须打 `rev`**（M3.5 起）。`nodes`/`edges` 的每一行都靠 `rev` 参与差分态势：
+   漏一条 = 那条变化从增量里静默消失 = planner 基于过时态势决策。清单见
+   `docs/03-M3.5-目标拆解与差分态势.md §3.3`，`store/delta_test.go` 会逐边对账。
 
 ---
 
@@ -34,7 +37,7 @@
 | M1 | CAS 领取、worker 执行循环、工具层、九分支收尾、CLI/API、demo | ✅ |
 | M2 | planner 主链（notify/debounce/心跳/六闸门）、OpenAI 兼容 provider、超时收尾、启动恢复 | ✅ |
 | M3a | 计划图（plan/step + depends_on + expected_evidence 规则判定）、覆盖度、off_plan 逃生门 | ✅ |
-| M3.5 | goals 拆解 agent、差分态势（P1-2） | ❌ 未做 |
+| M3.5 | 第 0 轮 goals 拆解（`set_goals`/`set_constraints`/`add_scope`）+ 差分态势（P1-2：`rev` 版本戳 / 增量输入 / `refresh_overview`） | ✅ |
 | M4 | 流式 + settlement + compaction + steer_work + 删除流水线 + 准入队列 | ❌ 未做 |
 | M5 | activity SSE + Next.js 静态导出 + 链路图 | ❌ 未做 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
@@ -125,6 +128,9 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_LLM_TEMPERATURE` | `0.2` | |
 | `QINYUAN_LLM_TIMEOUT_SECONDS` | `120` | |
 | `QINYUAN_LLM_MAX_RETRIES` | `2` | 仅对 429/5xx/网络重试 |
+| `QINYUAN_GOALS_MAX_TURNS` | `8` | 第 0 轮目标拆解的回合上限（1..30） |
+| `QINYUAN_PLANNER_FULL_EVERY` | `20` | planner 每 K 轮给一次全量态势（其余给增量） |
+| `QINYUAN_DELTA_LIMIT` | `200` | 单轮增量最多多少条变化，超过退全量（10..5000） |
 
 ---
 
@@ -137,7 +143,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 ├── docs/
 │   ├── 00-设计定稿.md          决策 / 不变量 / 偏离 / 验收对照
 │   ├── 01-M2-规划者与模型接入.md
-│   └── 02-M3-计划图与覆盖度.md
+│   ├── 02-M3-计划图与覆盖度.md
+│   └── 03-M3.5-目标拆解与差分态势.md
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -154,12 +161,13 @@ QINYUAN_LLM_MODEL=deepseek-chat
     │   ├── graph.go           nodes/edges：CAS、intent/fact/finding、版本号
     │   ├── entities.go        实体 upsert（部分唯一索引去重）
     │   ├── activity.go        过程库（只追加 + 清洗 + token 口径）
-    │   ├── goals.go           目标 + ProveGoal
+    │   ├── goals.go           目标 + ProveGoal + 拆解替换 / goals_at 标记
     │   ├── plans.go           计划图 + ready/done 判定 + expectedMatches
+    │   ├── delta.go           版本分配（bumpVersion）+ 差分读取（rev > since）
     │   └── coverage.go        覆盖度（只认 fact 锚点）
     ├── domain/                归一化（host/URL/eTLD+1/网段）+ 范围闸门
     ├── llm/                   Provider 接口 + Fake/Dynamic + OpenAI 兼容适配
-    ├── agent/                 prompt、工具面、worker/planner 执行循环
+    ├── agent/                 prompt、工具面、worker/planner/goals 执行循环、增量态势
     ├── engine/                调度：循环、闸门、收尾、超时、恢复、暂停
     ├── runplan/               用户输入 → 建 run 计划（范围 + 种子实体）
     ├── server/                HTTP 入口（解析 + DTO）
@@ -178,7 +186,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 7.5k 行、测试 ≈ 1.9k 行、schema ≈ 300 行。39 个测试。
+生产 Go ≈ 9.0k 行、测试 ≈ 2.7k 行、schema ≈ 330 行。51 个测试。
 
 ---
 
@@ -188,10 +196,10 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 | 表 | 作用 | 关键点 |
 |---|---|---|
-| `runs` | 一次探索 | `status ∈ open/achieved/failed`（知识层），`version` 写入口自增，`round_no` 冷节点/轮次基准 |
-| `run_tasks` | 业务状态 | `status ∈ created/running/paused/done/failed/timeout`；`paused/queued/timeout_seconds/first_run_at/deadline_at/worker_count/heartbeat_seconds` |
-| `nodes` | 图节点 | `kind ∈ goal/intent/fact/finding/hint/digest/plan/step`；状态机写在 `ck_node_state` CHECK 里 |
-| `edges` | 边 | `rel ∈ spawns/derived_from/yields/proves/covers/satisfies/realized_by/depends_on`；`src=上游, dst=下游` |
+| `runs` | 一次探索 | `status ∈ open/achieved/failed`（知识层）；`version` 是**单调版本分配器**（差分量游标），`round_no` 轮次基准 |
+| `run_tasks` | 业务状态 | `status ∈ created/running/paused/done/failed/timeout`；`paused/queued/timeout_seconds/first_run_at/deadline_at/worker_count/heartbeat_seconds`；**`goals_at`**=第 0 轮拆解完成时刻（0=未拆） |
+| `nodes` | 图节点 | `kind ∈ goal/intent/fact/finding/hint/digest/plan/step`；状态机写在 `ck_node_state` CHECK 里；**`rev`**=最后一次写入的版本号（差分用） |
+| `edges` | 边 | `rel ∈ spawns/derived_from/yields/proves/covers/satisfies/realized_by/depends_on`；`src=上游, dst=下游`；**`rev`** 同上 |
 | `anchors` | 探索节点 ↔ 实体 | 覆盖度的唯一依据 |
 | `activity` | 过程库 | **只追加**；`tool_use_id` 配对；token 只认 `kind='result'` |
 | `entities` | 领域实体（跨 run 共享） | 6 种 kind，每种一条**部分唯一索引**；`run_ids BIGINT[]` |
@@ -251,11 +259,15 @@ N × workerLoop    （拉取式：claim / sleep）
     3 正在删除?  M2 无删除流水线
     4 终态?      是 → 结束
     5 收尾中?    是 → 结束（终局轮由协调器直接调）
+   4.5 goals_at==0? 是 → 第 0 轮目标拆解（只跑一次；失败不写标记、下一轮重试）
     6 还有 open goal?  否 → goalless 分支
  → 登记 inflight、StampFirstRun、写 round marker
- → drainTriggers → planner.Plan（每轮全新会话）
+ → drainTriggers → planner.PlanRound（每轮全新会话；决定给全量还是增量态势）
  → 若 res.Met：CAS 任务 done + shutdownRuntime(ErrGoalMet)
 ```
+
+**4.5 必须排在 6 之前**：拆解还没跑时图里只有 seed 目标，先判 goalless 会把"还没拆解"误判成
+"目标都已达成"（详见 §14.16）。
 
 **goalless 分支**：frontier 抽干 → 任务 done + `shutdownRuntime`；否则继续等。
 （如果只改状态不停循环，worker 会一直空转——这是 M2 实测到的 bug。）
@@ -341,6 +353,9 @@ ResetRunningIntents()         # running → open（没有活着的 worker 拥有
 | `FinalPlanTimeout` | 2min | 终局判定独立 ctx |
 | `MaxTurns` | 12 | worker 每次执行回合上限 |
 | `MaxDuration` | 10min | worker 每次执行时长上限 |
+| `GoalsMaxTurns` | 8 | 第 0 轮拆解回合上限（`QINYUAN_GOALS_MAX_TURNS`） |
+| `PlannerFullEvery` | 20 | 每 K 轮给一次全量态势（`QINYUAN_PLANNER_FULL_EVERY`） |
+| `DeltaLimit` | 200 | 单轮增量上限，超过退全量（`QINYUAN_DELTA_LIMIT`） |
 
 ---
 
@@ -348,25 +363,30 @@ ResetRunningIntents()         # running → open（没有活着的 worker 拥有
 
 ### 6.1 矩阵
 
-| 工具 | planner | worker | 说明 |
-|---|:--:|:--:|---|
-| `overview` | ✅ | — | 与 planner 预取**同一份代码** |
-| `list_facts` | ✅ | — | 只给摘要 |
-| `list_findings` | ✅ | ✅ | 上报前查重 |
-| `node_detail` | ✅ | ✅ | 唯一拿 evidence 全文的口子 |
-| `get_worker_output` | ✅ | — | 判断意图"做到哪、卡在哪" |
-| `add_plan_step` | ✅ | — | 必须有 `expected_evidence` |
-| `list_plan_steps` | ✅ | — | 计划全貌 |
-| `mark_step_done` | ✅ | — | 规则没命中时显式判定 |
-| `add_intent` | ✅ | — | 有计划图时必须挂 `step_id` |
-| `prove_goal` | ✅ | — | 唯一能让任务正常结束的路径之一 |
-| `kill_work` | ✅ | — | 止损 |
-| `http_request` | — | ✅ | 范围闸门 + 出网守卫 |
-| `insert_assets` | — | ✅ | 只登记实体，不写结论 |
-| `record_fact` | — | ✅ | evidence 必填；自动满足计划步骤 |
-| `report_finding` | — | ✅ | 无证据一律拒绝 |
+| 工具 | planner | worker | goals | 说明 |
+|---|:--:|:--:|:--:|---|
+| `overview` | ✅ | — | — | 与 planner 预取**同一份代码** |
+| `refresh_overview` | ✅ | — | — | P1-2 逃生门：要全量（并让下一轮也全量） |
+| `list_facts` | ✅ | — | — | 只给摘要 |
+| `list_findings` | ✅ | ✅ | — | 上报前查重 |
+| `node_detail` | ✅ | ✅ | — | 唯一拿 evidence 全文的口子 |
+| `get_worker_output` | ✅ | — | — | 判断意图"做到哪、卡在哪" |
+| `add_plan_step` | ✅ | — | — | 必须有 `expected_evidence` |
+| `list_plan_steps` | ✅ | — | — | 计划全貌 |
+| `mark_step_done` | ✅ | — | — | 规则没命中时显式判定 |
+| `add_intent` | ✅ | — | — | 有计划图时必须挂 `step_id` |
+| `prove_goal` | ✅ | — | — | 唯一能让任务正常结束的路径之一 |
+| `kill_work` | ✅ | — | — | 止损 |
+| `http_request` | — | ✅ | — | 范围闸门 + 出网守卫 |
+| `insert_assets` | — | ✅ | — | 只登记实体，不写结论 |
+| `record_fact` | — | ✅ | — | evidence 必填；自动满足计划步骤 |
+| `report_finding` | — | ✅ | — | 无证据一律拒绝 |
+| `set_goals` | — | — | ✅ | 第 0 轮：替换 seed 目标 |
+| `set_constraints` | — | — | ✅ | 第 0 轮：allow/deny（必须自包含） |
+| `add_scope` | — | — | ✅ | 第 0 轮：最小授权范围 |
 
-**故意的缺失**：worker 没有 `add_intent/prove_goal/add_scope/list_facts`；planner 没有 `http_request/insert_assets/record_fact`。边界靠工具面，不靠 prompt。
+**故意的缺失**：worker 没有 `add_intent/prove_goal/add_scope/list_facts`；planner 没有 `http_request/insert_assets/record_fact`；
+goals 只能登记目标/约束/范围（不派方向、不判完成、不干活）。边界靠工具面，不靠 prompt。
 
 ### 6.2 工具定义与硬规矩
 
@@ -465,16 +485,19 @@ type Factory interface  { For(sessionKey string) Provider }
 - `activity.detail` 懒加载（列表不取）；API 目前只返回 summary。
 - 大输出落盘路径可预测、幂等（同内容同 sha1）。
 - 日志分级：`[engine] / [planner] / [worker] / [activity] / [llm] / [http]`。
+- **态势形态可查**：planner 每轮的 result 行 `metadata` 带 `situation`(full|delta) / `changes` / `prompt_bytes`，
+  "这一轮为什么贵"不用再猜；worker 取值新增 `goals`（第 0 轮拆解）。
 
 ---
 
-## 10. 测试（39 个，`*_test.go`）
+## 10. 测试（51 个，`*_test.go`）
 
 ### 10.1 基础设施
 
 - 每个测试一个**独立 schema**（`testkit.Store` / `store.newTestStore`），跑真实迁移，结束 drop；
 - 测试库默认 `qinyuan_test`（可用 `QINYUAN_TEST_DSN` 覆盖）；
 - 假 provider：`FakeFactory`（脚本）/ `DynamicFactory`（函数式）；
+- 读调用次数用 `FakeFactory.CallCount(key)`（带锁）；直接读 `Calls[key]` 会和后台引擎写 map 竞争，`-race` 会抓到；
 - `-race`：`scripts/race.ps1`，当前全绿。
 
 ### 10.2 覆盖清单（按包）
@@ -491,11 +514,18 @@ type Factory interface  { For(sessionKey string) Provider }
 | store | `TestPlanChainReadyByDependency` | 5 步链只有 1 步 ready；事实命中自动解锁下一步 |
 | store | `TestMarkStepDone` | 显式判定 + 证据类型校验 |
 | store | `TestCoverageCountsOnlyFacts` | 只认 fact 锚点，origin 不算 |
+| store | `TestDeltaReconstructsFullGraph` | **增量重建 == 全量**：14 类写路径逐条走一遍，每步对账 |
+| store | `TestDeltaTruncatesWhenTooManyChanges` | 变化超限 → Truncated 且不返回半截 |
+| store | `TestDeltaWindowIsExclusive` | 窗口 `(since, to]`：不漏读、不重复读 |
 | agent | `TestHTTPToolScopeGate` / `NoScopeDenies` / `LoopbackBlocked` / `Allowed` | 范围闸门 + SSRF 边界 |
 | agent | `TestInsertAssetsPartialSuccessAndIdempotent` | 部分成功 + 幂等 |
 | agent | `TestEvidenceGate` | 无证据 fact/finding 被拒 |
 | agent | `TestAddIntentScopeGate` | 越界资产不建节点 |
 | agent | `TestPlanStepAutoSatisfyAndIntentGate` | 自动满足 + step_id 强制 + off_plan 逃生门 |
+| agent | `TestPlannerDeltaAfterFirstRound` | 首轮全量；第二轮增量且带出两轮之间新写的事实 |
+| agent | `TestPlannerFullSnapshotEveryK` | 每 K 轮校准一次全量 |
+| agent | `TestPlannerRefreshOverviewForcesFull` | `refresh_overview` 后下一轮回到全量 |
+| agent | `TestDeltaPromptIsMuchSmaller` | 满规模图上增量 36%（−64%），守住 ≤60% |
 | domain | `TestNormalizeHostAndRootDomain` / `NormalizeURL` / `SegmentFor` / `ScopeSet` / `SplitHostPort` / `DialableIP` | 归一化与范围匹配（按点边界） |
 | engine | `TestWorkWritesFactAndDone` | 写回 + done + 配对 + 记账 |
 | engine | `TestMaxTurnsExhausted` | 撞上限 ≠ 完成，且已写回的事实不丢 |
@@ -506,6 +536,9 @@ type Factory interface  { For(sessionKey string) Provider }
 | engine | `TestRestoreResetsRunningAndContinues` | 恢复后继续推进 |
 | engine | `TestDeadlineSettlesTimeout` | 超时收尾落 timeout |
 | engine | `TestPlannerPlanStepChainEndToEnd` | 拆步 → 挂步派意图 → 规则命中 → prove → done（M3 全链路） |
+| engine | `TestEnsureGoalsDecomposesOnce` | 拆解写目标/约束/范围；seed 目标退役；第二次 0 次模型调用 |
+| engine | `TestEnsureGoalsFailureKeepsSeedGoal` | 失败不写 goals_at、seed 目标兜底、留 system 记录 |
+| engine | `TestEngineGoalsRoundBeforePlanner` | 端到端：先拆解再规划（闸门顺序） |
 | llm | `TestOpenAICompleteMapsTools` / `ErrorClassification` / `LooksLikeQuota` / `RetriesTransientThenGivesUp` | 请求/响应映射 + 错误分类 + 重试上限 |
 
 ### 10.3 尚未覆盖（要在对应里程碑补）
@@ -530,6 +563,7 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 | 8 | worker 在 planner 还没产意图时退出循环 | 用"此刻没有 open 意图"判断退出 | workerLoop 只在 ctx 结束时退出 |
 | 9 | 超时协调器自锁 | `settleTask → StopTask → wg.Wait()`，而 deadlineLoop 自己在 wg 里 | deadlineLoop 不进 `rt.wg` |
 | 10 | 步骤状态按"最新在前"返回，测试/渲染读反 | `NodesByKind` 是 id DESC | `PlanGraph` 单独按 id ASC 查 |
+| 11 | `scripts/race.ps1` 把 `./...` 拆成 `.`、`/`、`.`… 然后报 "no Go files" | `$targets = if (...) { $args } else { @('./...') }`：PowerShell 的 if 表达式把**单元素数组解包成字符串**，随后 `@targets` 按字符展开 | 改成先赋数组再在分支里替换（见脚本注释）；`-race` 已重新全绿 |
 
 > 共性：**上下文生命周期**（1/3/6）与**状态机竞态**（2/7/8/9）。只看代码看不出来，必须让测试真的跑起来。
 
@@ -539,10 +573,14 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 
 ### M3.5
 
-- **goals 拆解 agent**：仍然只有一个种子目标（= 用户目标）。需要第 0 轮 `set_goals/set_constraints/add_scope` 工具集 + `run_tasks.goals_at` 标记。
-- **差分态势（P1-2）**：仍是每轮全量 overview。`runs.version` 已在写入口自增，但"快照 + 自某版本以来的事件流"没做。
+- ~~**goals 拆解 agent**~~ ✅：第 0 轮 `set_goals/set_constraints/add_scope` + `run_tasks.goals_at` 已落地
+  （`engine.ensureGoals`、`agent/goals.go`、`store/goals.go`）。
+- ~~**差分态势（P1-2）**~~ ✅：`nodes.rev`/`edges.rev` + `store.DeltaSince` + planner 的增量输入与 `refresh_overview`
+  已落地。**代价**：新增写路径必须打 `rev`（§0.6）。
 - **计划修订**：`revision+1` 没有接口，`off_plan` 只被记录，没有汇总成"计划该改"的信号。
 - **步骤预算**：`payload.budget` 预留，worker 还没按步骤预算夹逼。
+- **增量的事件压缩**：同一节点一轮内被改多次只出现一次（有意），但"改了几次"没渲染出来。
+- **跨进程的版本一致性压力测试**：现在靠"重启必全量"规避崩溃窗口，没有专门的 fuzz。
 
 ### M4
 
@@ -570,6 +608,13 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 3. 需要 store 就通过 `rc.Store`，需要编排能力（kill/notify）用 `rc.KillWork` 之类的回调，**不要 import engine**；
 4. 加进 `NewPlannerRegistry` 或 `NewWorkerRegistry`（想清楚它属于哪个角色）；
 5. 写一个测试：至少覆盖"正常路径 + 一个拒绝路径"。
+
+### 13.1b 新增/修改一条写路径（M3.5 起）
+
+1. 在同一个事务里先写业务行，再做 `rev, err := bumpVersion(ctx, tx, runID)`；
+2. `stampNodes(...)` / `stampEdge(...)` 把这次写入的行打上 `rev`；
+3. 失败的 CAS 不要提前 bump（先 UPDATE 再判 `RowsAffected`）；
+4. 跑 `store.TestDeltaReconstructsFullGraph`：它会告诉你差分有没有丢。
 
 ### 13.2 加一种节点 kind / 状态
 
@@ -611,12 +656,18 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 13. **旧终端 PATH 可能还是旧 Go/旧 gcc**：用 `scripts/go.ps1` / `scripts/race.ps1`，它们显式指定二进制。
 14. **后台 job 可能被会话间隔杀掉**：DB 掉了先 `pg_isready`，再 `devdb.ps1 serve`；WAL 会自动恢复。
 15. **测试并发用例多跑几遍**：`go test ./internal/store -run TestClaimConcurrent -count=20`（`-race` 之外再加一道）。
+16. **第 0 轮拆解必须排在 goalless 闸门之前**：否则新任务一启动就被判"目标都已达成"（seed 目标还没被拆解替换）。
+17. **`rev` 是版本号不是计数器**：它会被反复覆盖（同一行每次写入拿新号），不要用它排序或计数；
+    也不要在失败的 CAS 之前 `bumpVersion`（浪费版本号且会在增量里留下"没发生的变化"）。
+18. **`DeltaSince` 的 `to` 必须先快照**：先用 `rev <= to` 过滤再查，否则"读到一半又有写入"会让窗口与数据不一致。
+19. **拆解失败不要写 `goals_at`**：写了就再也不会重试，用户看到的是"系统只把原话当目标"。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+d73d6f4 文档：新增 HANDOFF.md（环境/状态机/已修缺陷/扩展指南），README 加入口
 077f3d3 工具链：接入 mingw-w64，scripts/race.ps1 跑 -race；全量竞态检测通过
 00250f4 工具链：scripts/go.ps1 改为优先系统 64 位 Go（amd64），便携版兜底
 e3a7cde M3a: 计划图（step 依赖 + expected_evidence 规则判定）+ 覆盖度 + off_plan 逃生门；切换 64 位 Go
@@ -625,12 +676,16 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-工作区干净；`docs/00–02` 是设计与验收记录；本文是状态快照。
+**M3.5 的改动还在工作区，未提交**（按业主的习惯：先 review 再提交）。
+改动清单：`docs/03` + `internal/store/{delta,goals,graph,plans,runs}.go` + `internal/agent/{delta,goals,tool_goals,planner,prompt,tool_read}.go`
++ `internal/engine/engine.go` + `internal/config` + `internal/server` + 相应测试；
+另外 `go fmt` 顺手修了 `plan_test.go` / `tool_plan.go` 的格式（纯空白）。
+`docs/00–03` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 39 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 51 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 ```
@@ -639,7 +694,7 @@ pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 
 ## 16. 需要人拍板的问题（接手 AI 不要自己决定）
 
-1. **M3.5 还是 M4**：goals 拆解 + 差分态势（上下文成本）vs 长跑可靠性（settlement/compaction/删除）。
+1. ~~M3.5 还是 M4~~ → 已选 M3.5 并完成；**下一个是 M4 还是 M5**（长跑可靠性 vs 可观测/前端）。
 2. **真实模型 live 冒烟**：需要 `base_url + model`（key 走环境变量）；这一步能暴露 prompt 质量与工具调用质量，是 fake provider 测不出来的。
 3. **`expectedMatches` 的匹配规则**（中文 2-gram + 60% 覆盖）是否够准；太松会假完成，太紧会一直等人。
 4. **`add_intent` 强制 `step_id`** 是否会让 planner 为了过校验硬凑步骤。

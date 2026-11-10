@@ -26,15 +26,15 @@ type PlanGraph struct {
 
 // StepView 是给模型看的一步。
 type StepView struct {
-	ID         int64   `json:"id"`
-	Text       string  `json:"text"`
-	Expected   string  `json:"expected_evidence"`
-	State      string  `json:"state"`
-	Priority   int     `json:"priority"`
-	DependsOn  []int64 `json:"depends_on"`
-	RealizedBy int64   `json:"realized_by,omitempty"`
-	SatisfiedBy int64  `json:"satisfied_by,omitempty"`
-	RuleHit    bool    `json:"satisfied_by_rule,omitempty"`
+	ID          int64   `json:"id"`
+	Text        string  `json:"text"`
+	Expected    string  `json:"expected_evidence"`
+	State       string  `json:"state"`
+	Priority    int     `json:"priority"`
+	DependsOn   []int64 `json:"depends_on"`
+	RealizedBy  int64   `json:"realized_by,omitempty"`
+	SatisfiedBy int64   `json:"satisfied_by,omitempty"`
+	RuleHit     bool    `json:"satisfied_by_rule,omitempty"`
 }
 
 // EnsurePlan 返回当前活跃计划；没有就建一个（每个 run 只允许一个活跃计划）。
@@ -131,8 +131,18 @@ func (s *Store) AddStep(ctx context.Context, in AddStepInput) (int64, error) {
 			return 0, err
 		}
 	}
-	if err := bumpVersion(ctx, tx, in.RunID); err != nil {
+	rev, err := bumpVersion(ctx, tx, in.RunID)
+	if err != nil {
 		return 0, err
+	}
+	// 计划节点可能是这一步顺手建出来的（EnsurePlan），所以一起打戳。
+	if err := stampNodes(ctx, tx, in.RunID, rev, stepID, planID); err != nil {
+		return 0, err
+	}
+	for _, dep := range in.DependsOn {
+		if err := stampEdge(ctx, tx, in.RunID, rev, stepID, "depends_on", dep); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
@@ -200,10 +210,10 @@ func (s *Store) PlanGraph(ctx context.Context, runID int64) (*PlanGraph, error) 
 	}
 	for _, n := range steps {
 		var sp struct {
-			Text       string `json:"text"`
-			Expected   string `json:"expected_evidence"`
-			Satisfied  int64  `json:"satisfied_by_fact"`
-			Rule       bool   `json:"satisfied_by_rule"`
+			Text      string `json:"text"`
+			Expected  string `json:"expected_evidence"`
+			Satisfied int64  `json:"satisfied_by_fact"`
+			Rule      bool   `json:"satisfied_by_rule"`
 		}
 		_ = n.DecodePayload(&sp)
 		sv := StepView{
@@ -263,7 +273,13 @@ func (s *Store) RecomputeSteps(ctx context.Context, runID int64) (int, error) {
 
 // CASStepState 步骤状态迁移（带 expected）。
 func (s *Store) CASStepState(ctx context.Context, runID, stepID int64, expected, next string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE nodes SET state=$4, updated_at=now(),
 		       completed_at=CASE WHEN $4='done' THEN now() ELSE completed_at END
 		 WHERE run_id=$1 AND id=$2 AND kind='step' AND state=$3`,
@@ -271,7 +287,20 @@ func (s *Store) CASStepState(ctx context.Context, runID, stepID int64, expected,
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return false, err
+	}
+	if err := stampNodes(ctx, tx, runID, rev, stepID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SatisfyStepsByFact 用规则匹配"这条事实是否满足某一步的 expected_evidence"。
@@ -334,8 +363,14 @@ func (s *Store) MarkStepDone(ctx context.Context, runID, stepID, factID int64) (
 }
 
 func (s *Store) markStepSatisfied(ctx context.Context, runID, stepID, factID int64, byRule bool) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
 	if factID > 0 {
-		if _, err := s.pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO edges (run_id, src_id, rel, dst_id) VALUES ($1,$2,'satisfies',$3)
 			ON CONFLICT DO NOTHING`, runID, factID, stepID); err != nil {
 			return err
@@ -346,29 +381,57 @@ func (s *Store) markStepSatisfied(ctx context.Context, runID, stepID, factID int
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `
+	if _, err = tx.Exec(ctx, `
 		UPDATE nodes SET state='done', completed_at=now(), updated_at=now(),
 		       payload = payload || $3::jsonb
 		 WHERE run_id=$1 AND id=$2 AND kind='step' AND state IN ('todo','ready','running')
-		   AND state <> 'done'`, runID, stepID, raw)
+		   AND state <> 'done'`, runID, stepID, raw); err != nil {
+		return err
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE runs SET version = version + 1 WHERE id=$1`, runID)
-	return err
+	if err := stampNodes(ctx, tx, runID, rev, stepID); err != nil {
+		return err
+	}
+	if factID > 0 {
+		if err := stampEdge(ctx, tx, runID, rev, factID, "satisfies", stepID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // LinkStepIntent 把步骤和派出去的意图连起来（step --realized_by--> intent），并把步骤置 running。
 func (s *Store) LinkStepIntent(ctx context.Context, runID, stepID, intentID int64) error {
-	if _, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO edges (run_id, src_id, rel, dst_id) VALUES ($1,$2,'realized_by',$3)
 		ON CONFLICT DO NOTHING`, runID, stepID, intentID); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE nodes SET state='running', updated_at=now()
-		 WHERE run_id=$1 AND id=$2 AND kind='step' AND state IN ('ready','todo','running')`, runID, stepID)
-	return err
+		 WHERE run_id=$1 AND id=$2 AND kind='step' AND state IN ('ready','todo','running')`, runID, stepID); err != nil {
+		return err
+	}
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if err := stampNodes(ctx, tx, runID, rev, stepID); err != nil {
+		return err
+	}
+	if err := stampEdge(ctx, tx, runID, rev, stepID, "realized_by", intentID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // expectedMatches 判断一条事实文本是否满足期望证据。

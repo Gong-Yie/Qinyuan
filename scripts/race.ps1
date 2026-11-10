@@ -46,7 +46,11 @@ if (-not $gcc) {
 $env:CC = $gcc
 $env:CGO_ENABLED = '1'
 
-$targets = if ($args.Count -gt 0) { $args } else { @('./...') }
+# 注意：不要写成 `$targets = if (...) { $args } else { @('./...') }` ——
+# PowerShell 的 if 表达式会把**单元素数组解包成字符串**，随后 `@targets` 会把字符串
+# 按字符展开（"./..." 变成 "."、"/"、"."、"..." 四个包，go test 直接报 no Go files）。
+$targets = @('./...')
+if ($args.Count -gt 0) { $targets = $args }
 Write-Host "[race] CC=$gcc"
 & pwsh -NoProfile -File $goScript test -race @targets
 exit $LASTEXITCODE

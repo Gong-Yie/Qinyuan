@@ -40,6 +40,11 @@ type Config struct {
 	DefaultMaxTurns int           // worker 每次执行的回合上限
 	DefaultTimeout  time.Duration // worker 每次执行的时长上限
 
+	// M3.5：调度与上下文成本的可调项（都有安全默认值，不改也能跑）。
+	GoalsMaxTurns    int // 第 0 轮目标拆解的回合上限
+	PlannerFullEvery int // planner 每 K 轮给一次全量态势
+	DeltaLimit       int // 单轮增量最多多少条变化（超过退全量）
+
 	LLM LLMConfig
 }
 
@@ -83,12 +88,15 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		DataDir:         "data",
-		Addr:            "127.0.0.1:8787",
-		LogLevel:        "info",
-		MaxToolOutput:   30000,
-		DefaultMaxTurns: 12,
-		DefaultTimeout:  10 * time.Minute,
+		DataDir:          "data",
+		Addr:             "127.0.0.1:8787",
+		LogLevel:         "info",
+		MaxToolOutput:    30000,
+		DefaultMaxTurns:  12,
+		DefaultTimeout:   10 * time.Minute,
+		GoalsMaxTurns:    8,
+		PlannerFullEvery: 20,
+		DeltaLimit:       200,
 		LLM: LLMConfig{
 			Provider:    "fake",
 			BaseURL:     "https://api.openai.com/v1",
@@ -129,6 +137,27 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_TIMEOUT_SECONDS 非法：%q", v)
 		}
 		c.DefaultTimeout = time.Duration(n) * time.Second
+	}
+	if v, _ := pick("QINYUAN_GOALS_MAX_TURNS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 30 {
+			return nil, fmt.Errorf("QINYUAN_GOALS_MAX_TURNS 非法：%q（1..30）", v)
+		}
+		c.GoalsMaxTurns = n
+	}
+	if v, _ := pick("QINYUAN_PLANNER_FULL_EVERY", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("QINYUAN_PLANNER_FULL_EVERY 非法：%q（正整数；0 不允许，想永远增量请设很大）", v)
+		}
+		c.PlannerFullEvery = n
+	}
+	if v, _ := pick("QINYUAN_DELTA_LIMIT", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 10 || n > 5000 {
+			return nil, fmt.Errorf("QINYUAN_DELTA_LIMIT 非法：%q（10..5000）", v)
+		}
+		c.DeltaLimit = n
 	}
 
 	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)

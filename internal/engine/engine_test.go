@@ -106,6 +106,11 @@ func newLoopbackRun(t *testing.T, st *store.Store, target string) (*model.Run, i
 	if err != nil || len(ents) == 0 {
 		t.Fatalf("种子实体缺失：%v", err)
 	}
+	// 这些用例模拟"已经过了第 0 轮"的任务：不跑目标拆解，省一次模型往返。
+	// 拆解本身的端到端在 TestGoalsDecomposition* 里单独测。
+	if _, err := st.MarkGoalsDecomposed(context.Background(), run.ID); err != nil {
+		t.Fatalf("标记 goals 已拆解失败：%v", err)
+	}
 	return run, ents[0].ID
 }
 

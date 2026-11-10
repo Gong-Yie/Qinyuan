@@ -337,3 +337,21 @@ DO $$ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_steps_state ON nodes(run_id, state) WHERE kind = 'step';
+
+-- ---------------------------------------------------------------------------
+-- 14. M3.5：目标拆解标记 + 差分态势的版本戳
+--
+-- goals_at：第 0 轮 goals 拆解完成的时刻（0 = 还没拆过）。拆解失败不写，
+--           下一轮会重试；此时 CreateRun 种下的 seed 目标仍然兜底，任务不会停摆。
+--
+-- rev：这一行"最后一次被写入时分配的版本号"。版本由 runs.version 单调分配
+--      （见 store/delta.go: bumpVersion），于是"自版本 V 以来的变化"= rev > V。
+--      历史行的 rev 留 0：它们属于首次全量快照，不该再出现在增量里。
+-- ---------------------------------------------------------------------------
+ALTER TABLE run_tasks ADD COLUMN IF NOT EXISTS goals_at BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE edges ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_rev ON nodes(run_id, rev);
+CREATE INDEX IF NOT EXISTS idx_edges_rev ON edges(run_id, rev);

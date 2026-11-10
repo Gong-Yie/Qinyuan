@@ -22,7 +22,9 @@ func TestPlanStepAutoSatisfyAndIntentGate(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("创建第一步失败：%v %s", err, res.Text)
 	}
-	var s1 struct{ StepID int64 `json:"step_id"` }
+	var s1 struct {
+		StepID int64 `json:"step_id"`
+	}
 	if err := json.Unmarshal([]byte(res.Text), &s1); err != nil {
 		t.Fatalf("返回不是 JSON：%s", res.Text)
 	}
@@ -32,7 +34,9 @@ func TestPlanStepAutoSatisfyAndIntentGate(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("创建第二步失败：%v %s", err, res.Text)
 	}
-	var s2 struct{ StepID int64 `json:"step_id"` }
+	var s2 struct {
+		StepID int64 `json:"step_id"`
+	}
 	if err := json.Unmarshal([]byte(res.Text), &s2); err != nil {
 		t.Fatalf("返回不是 JSON：%s", res.Text)
 	}

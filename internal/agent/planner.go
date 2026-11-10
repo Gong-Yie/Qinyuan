@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"qinyuan/internal/domain"
 	"qinyuan/internal/llm"
@@ -59,6 +60,23 @@ type Planner struct {
 	MaxOutput int
 	MaxTurns  int
 	Logger    *slog.Logger
+
+	// FullSnapshotEvery：每 K 轮强制给一次全量态势（0 = 用默认 20）。
+	// 只靠增量会让模型慢慢忘记更早的事实；全量快照是"记忆校准"。
+	FullSnapshotEvery int
+	// DeltaLimit：单轮增量最多多少条变化（0 = 默认 200），超过降级为全量。
+	DeltaLimit int
+
+	deltaMu  sync.Mutex
+	lastSeen map[int64]int64 // runID -> 已经给模型看过的版本
+}
+
+// PlanOptions 是"这一轮怎么给态势"的开关。
+type PlanOptions struct {
+	// Final=true：收尾轮（只判定目标、不派意图），强制全量态势。
+	Final bool
+	// ForceFull=true：本轮必须给全量（重试、重启、显式要求）。
+	ForceFull bool
 }
 
 // PlanResult 是一轮规划的结果。
@@ -68,12 +86,22 @@ type PlanResult struct {
 	ToolCalls int
 	Summary   string
 	Usage     llm.Usage
+
+	// Situation 记录本轮给的是全量还是增量（full | delta），用于验收与排障。
+	Situation   string
+	Changes     int
+	PromptBytes int
 }
 
 // Plan 跑一轮规划。
 //
 // hooks.killWork 由编排层注入：planner 的 kill_work 只应作用于本任务在跑的 work。
 func (p *Planner) Plan(ctx context.Context, runID int64, triggers []Trigger, final bool, killWork func(int64) bool, emit Emitter) (*PlanResult, error) {
+	return p.PlanRound(ctx, runID, triggers, PlanOptions{Final: final}, killWork, emit)
+}
+
+// PlanRound 是 Plan 的完整版：额外决定"这一轮给全量还是增量"。
+func (p *Planner) PlanRound(ctx context.Context, runID int64, triggers []Trigger, opts PlanOptions, killWork func(int64) bool, emit Emitter) (*PlanResult, error) {
 	if p.Store == nil || p.Providers == nil || p.Registry == nil {
 		return nil, fmt.Errorf("planner 未装配")
 	}
@@ -92,17 +120,53 @@ func (p *Planner) Plan(ctx context.Context, runID int64, triggers []Trigger, fin
 	if err != nil {
 		return nil, err
 	}
-	ov, err := BuildOverview(ctx, p.Store, runID, true)
-	if err != nil {
-		return nil, err
+
+	// ── 决定本轮态势的形态：全量 or 增量（P1-2）──
+	//
+	// 首轮必须全量（模型还没有基线）；收尾轮必须全量（要判目标，不能靠增量猜）；
+	// 每 K 轮校准一次；变化太多（> DeltaLimit）降级全量。
+	var ov *Overview
+	var delta *DeltaOverview
+	situation := "full"
+	since, hasSince := p.lastSeenVersion(runID)
+	full := opts.ForceFull || opts.Final || !hasSince || p.fullSnapshotDue(run.RoundNo)
+	if !full {
+		limit := p.DeltaLimit
+		if limit <= 0 {
+			limit = 200
+		}
+		d, truncated, derr := BuildDeltaOverview(ctx, p.Store, runID, run, since, limit)
+		switch {
+		case derr != nil:
+			// 读增量失败不该让整轮规划失败：退回全量。
+			if p.Logger != nil {
+				p.Logger.Warn("[planner] 读增量态势失败，退回全量", "run", runID, "err", derr)
+			}
+		case truncated:
+			emit(ctx, &model.Activity{
+				RunID: runID, Worker: "planner", Kind: model.ActSystem,
+				Summary: fmt.Sprintf("自版本 %d 以来变化过多（%d 条），本轮降级为全量态势", since, d.ChangesTotal),
+			})
+		default:
+			delta = d
+			situation = "delta"
+		}
+	}
+	if delta == nil {
+		ov, err = BuildOverview(ctx, p.Store, runID, true)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	scopeSet := domain.NewScopeSet(scopes)
+	forceNext := false
 	rc := &Context{
 		Store: p.Store, RunID: runID,
 		Scopes: scopeSet, Constraints: constraints,
 		DataDir: p.DataDir, MaxOutput: p.MaxOutput,
-		Final: final, KillWork: killWork,
+		Final: opts.Final, KillWork: killWork,
+		RefreshRequested: &forceNext,
 	}
 
 	maxTurns := p.MaxTurns
@@ -112,14 +176,15 @@ func (p *Planner) Plan(ctx context.Context, runID int64, triggers []Trigger, fin
 	sessionKey := fmt.Sprintf("run%d-planner", runID)
 	provider := p.Providers.For(sessionKey)
 
-	msgs := []llm.Message{{
-		Role: llm.RoleUser,
-		Text: BuildPlannerUserMessage(run, triggers, ov, final),
-	}}
-	system := BuildPlannerSystem(run, constraints, scopeSet.Describe(), final)
+	userMsg := BuildPlannerUserMessage(run, triggers, ov, delta, opts.Final)
+	msgs := []llm.Message{{Role: llm.RoleUser, Text: userMsg}}
+	system := BuildPlannerSystem(run, constraints, scopeSet.Describe(), opts.Final)
 	specs := p.Registry.Specs()
 
-	out := &PlanResult{}
+	out := &PlanResult{Situation: situation, PromptBytes: len(userMsg) + len(system)}
+	if delta != nil {
+		out.Changes = len(delta.Events)
+	}
 	var lastText string
 
 	for turn := 0; turn < maxTurns; turn++ {
@@ -199,6 +264,19 @@ func (p *Planner) Plan(ctx context.Context, runID int64, triggers []Trigger, fin
 	out.Met = len(goals) > 0 && open == 0
 	out.Summary = model.TrimSummary(lastText, 800)
 
+	// 记录"模型已经看到哪个版本了"：
+	//   - 增量：用本次窗口的上界；
+	//   - 全量：用本轮开始时读到的版本（期间的新写入会在下一轮作为增量补上，
+	//     宁可多补一次，也不能漏）。
+	//   - 模型显式要求刷新：清掉基线，下一轮重新给全量。
+	if forceNext {
+		p.forgetDelta(runID)
+	} else if delta != nil {
+		p.setLastSeen(runID, delta.ToVersion)
+	} else {
+		p.setLastSeen(runID, run.Version)
+	}
+
 	emit(context.WithoutCancel(ctx), &model.Activity{
 		RunID: runID, Worker: "planner", Kind: model.ActResult,
 		Summary:     fmt.Sprintf("本轮规划结束：产出 %d 条意图，%d/%d 目标未达成", out.Intents, open, len(goals)),
@@ -208,9 +286,49 @@ func (p *Planner) Plan(ctx context.Context, runID int64, triggers []Trigger, fin
 		Metadata: map[string]any{
 			"intents": out.Intents, "tool_calls": out.ToolCalls,
 			"goals_open": open, "goals_total": len(goals), "met": out.Met,
+			"situation": out.Situation, "changes": out.Changes, "prompt_bytes": out.PromptBytes,
 		},
 	})
 	return out, nil
+}
+
+// ---------- 差分态势的基线（进程内）----------
+//
+// 基线只在内存里：它是"这一轮模型看过什么"的缓存，丢了最多让下一轮多给一次
+// 全量（安全方向），所以不需要落库 —— 与"状态全在 DB"的主原则不冲突。
+
+func (p *Planner) lastSeenVersion(runID int64) (int64, bool) {
+	p.deltaMu.Lock()
+	defer p.deltaMu.Unlock()
+	v, ok := p.lastSeen[runID]
+	return v, ok
+}
+
+func (p *Planner) setLastSeen(runID, version int64) {
+	p.deltaMu.Lock()
+	defer p.deltaMu.Unlock()
+	if p.lastSeen == nil {
+		p.lastSeen = map[int64]int64{}
+	}
+	p.lastSeen[runID] = version
+}
+
+func (p *Planner) forgetDelta(runID int64) {
+	p.deltaMu.Lock()
+	defer p.deltaMu.Unlock()
+	delete(p.lastSeen, runID)
+}
+
+// fullSnapshotDue 判断本轮是否该做一次全量校准（首轮 + 每 K 轮）。
+func (p *Planner) fullSnapshotDue(round int64) bool {
+	every := p.FullSnapshotEvery
+	if every <= 0 {
+		every = 20
+	}
+	if round <= 1 {
+		return true
+	}
+	return (round-1)%int64(every) == 0
 }
 
 // countIntents 从 add_intent 的返回里数成功条数。

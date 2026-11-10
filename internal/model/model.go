@@ -112,6 +112,9 @@ type Task struct {
 	HeartbeatSeconds int
 	WorkerCount      int
 	CompletedAt      int64
+	// GoalsAt 是第 0 轮目标拆解完成时刻（unix 秒；0 = 还没拆过）。
+	// 拆解失败不写这个标记，下一轮会重试，此时 seed 目标兜底。
+	GoalsAt int64
 }
 
 // Node 图节点。Payload 保留原始 JSON，避免无谓的 map 反复编解码。
@@ -127,9 +130,12 @@ type Node struct {
 	BlockedReason  string
 	ContentVersion int
 	ColdSinceRound *int64
-	CompletedAt    *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Rev 是最后一次写入分配的版本号（0 = M3.5 之前的历史行）。
+	// 差分态势靠它判断"自上次以来这一行变过没有"。
+	Rev         int64
+	CompletedAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // DecodePayload 把 payload 解到 v。
@@ -167,6 +173,8 @@ type Edge struct {
 	SrcID int64
 	Rel   string
 	DstID int64
+	// Rev 同 Node.Rev：这条边最后一次写入时的版本号。
+	Rev int64
 }
 
 // Activity 执行过程的一步（只追加）。

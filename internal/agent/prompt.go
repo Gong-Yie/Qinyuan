@@ -185,7 +185,11 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
 }
 
 // BuildPlannerUserMessage 是 planner 每轮的 user 消息：触发 + 态势 + 指令。
-func BuildPlannerUserMessage(run *model.Run, triggers []Trigger, ov *Overview, final bool) string {
+//
+// ov 与 delta 二选一：
+//   - delta == nil：给全量态势（首轮 / 每 K 轮 / 变化过多降级 / 收尾轮）；
+//   - delta != nil：给"自上次以来的变化 + 当前态摘要"（普通轮次）。
+func BuildPlannerUserMessage(run *model.Run, triggers []Trigger, ov *Overview, delta *DeltaOverview, final bool) string {
 	var b strings.Builder
 
 	b.WriteString("【本次触发本轮的实际变动（先看这里，再决定是否补方向）】\n")
@@ -198,20 +202,29 @@ func BuildPlannerUserMessage(run *model.Run, triggers []Trigger, ov *Overview, f
 		}
 	}
 
-	raw, err := json.Marshal(ov)
-	if err != nil {
-		raw = []byte(`{}`)
+	frontier, running := 0, 0
+	if delta != nil {
+		b.WriteString(renderDeltaState(delta))
+		frontier, running = delta.Frontier, len(delta.Running)
+	} else {
+		raw, err := json.Marshal(ov)
+		if err != nil {
+			raw = []byte(`{}`)
+		}
+		b.WriteString("\n【本轮态势（overview 预取，等同你调用该工具的返回；需要细节再按需调 node_detail/list_facts 等）】：\n")
+		b.Write(raw)
+		b.WriteString("\n\n")
+		if ov != nil {
+			frontier, running = ov.Frontier, len(ov.Running)
+		}
 	}
-	b.WriteString("\n【本轮态势（overview 预取，等同你调用该工具的返回；需要细节再按需调 node_detail/list_facts 等）】：\n")
-	b.Write(raw)
-	b.WriteString("\n\n")
 
 	if final {
 		b.WriteString("【本轮要求】收尾轮：不要再派意图。核对目标与证据，能 prove 的 prove，最后用一句话总结。\n")
 		return b.String()
 	}
 
-	stopped := ov.Frontier == 0 && len(ov.Running) == 0
+	stopped := frontier == 0 && running == 0
 	switch {
 	case stopped:
 		b.WriteString("【本轮要求】探索已停摆（没有任何 open/running 意图）。你必须在本轮产出至少一个与既有意图互不重复的新意图（不得产出 0 意图）；若目标其实已达成，则 prove_goal。\n")
@@ -220,6 +233,41 @@ func BuildPlannerUserMessage(run *model.Run, triggers []Trigger, ov *Overview, f
 	default:
 		b.WriteString("【本轮要求】定时巡检：复查在跑意图、判定目标、决定是否补方向；0 意图必须给出正当理由。\n")
 	}
+	return b.String()
+}
+
+// renderDeltaState 渲染增量态势：变化清单（文本，省 token）+ 当前态摘要（JSON，可核对）。
+func renderDeltaState(d *DeltaOverview) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n【本轮态势：增量（版本 %d → %d，共 %d 条变化）】\n", d.FromVersion, d.ToVersion, d.ChangesTotal)
+	if len(d.Events) == 0 {
+		b.WriteString("- （没有变化：这一轮是被心跳/人工触发的空转巡检）\n")
+	}
+	for _, ev := range d.Events {
+		if ev.Kind == "edge" {
+			fmt.Fprintf(&b, "- 边 #%d --%s--> #%d\n", ev.Src, ev.Rel, ev.Dst)
+			continue
+		}
+		line := fmt.Sprintf("- %s#%d %s：「%s」", ev.NodeKind, ev.ID, ev.State, ev.Summary)
+		if ev.Confidence != "" {
+			line = fmt.Sprintf("- %s#%d %s(%s)：「%s」", ev.NodeKind, ev.ID, ev.State, ev.Confidence, ev.Summary)
+		}
+		b.WriteString(line + "\n")
+	}
+
+	// 只序列化"当前态摘要"：变化本身已经用上面的文本行表达过了，
+	// 再在 JSON 里重复一遍等于白烧 token。
+	state := *d
+	state.Events = nil
+	raw, err := json.Marshal(state)
+	if err != nil {
+		raw = []byte(`{}`)
+	}
+	b.WriteString("\n【当前态摘要（必须给全的部分：目标 / 在跑意图 / 前沿数 / ready 步骤 / 计数）】\n")
+	b.Write(raw)
+	b.WriteString("\n")
+	b.WriteString("【视图说明】上面是**增量**：只列了自上次以来变化的节点，以及当前态摘要。" +
+		"更早的节点没有列出——需要完整历史用 refresh_overview（要全量态势），要细节用 list_facts / node_detail。\n\n")
 	return b.String()
 }
 
@@ -235,4 +283,77 @@ func BuildWorkerUserMessage(ov *Overview) string {
 	return "【本任务当前态势（开局参考，可能随后过时；不要为了让覆盖面更好看而偏离你领到的意图）】：\n" +
 		string(raw) +
 		"\n\n开始执行上面这条意图：只做它、只产生事实/实体/漏洞，做完即停。"
+}
+
+// BuildGoalsSystem 是第 0 轮"目标拆解者"的 system prompt（实现规格/03 §4）。
+//
+// 三条硬规则（删掉任何一条，拆解就会退化成"把用户那句话抄一遍"）：
+//  1. 先抽约束，再拆目标 —— 约束是操作边界，不是目标；
+//  2. 目标 = 最终可核验的结果，**侦察/验证/攻击步骤不是目标**；
+//  3. 范围按最小原则登记，**严禁**把带子域的主机名缩成根域。
+func BuildGoalsSystem(run *model.Run, scopes string) string {
+	var b strings.Builder
+	b.WriteString(`你是「钦原」的目标拆解者，只跑一次：把一个任务的原始输入翻译成【可核验的最终目标】+【操作约束】+【最小授权范围】。
+你不是规划者、也不是执行者：不派方向、不调工具干活、不判完成。
+`)
+	b.WriteString("\n任务原始目标：" + run.Goal + "\n")
+	if run.Description != "" {
+		b.WriteString("任务描述：" + run.Description + "\n")
+	}
+	if scopes != "" {
+		b.WriteString("系统已登记的授权范围：" + scopes + "\n")
+	}
+
+	b.WriteString(`
+### 第一步：抽取操作约束（先做这个）
+从目标/描述里识别操作员对"可以做什么、不可以做什么"的**明确规定**，用 set_constraints 逐条登记：
+- deny：禁止的操作（不扫端口、不得对生产做写/删、禁止爆破、不碰某子域）
+- allow：明确允许/限定的范围（只允许被动侦察、仅针对某域名）
+- 约束 ≠ 目标，也 ≠ 步骤：它是对**操作行为边界**的规定。
+- 约束必须自包含、写死具体目标：把"当前目标/本站/这个端口"替换成原文里的具体值
+  （约束会被单独注入执行阶段，脱离上下文后指代词没人知道指谁）。
+- 只登记明确写出或强调的约束，严禁臆造；拿不准类型时用 deny（更保守）。
+- 确实没有任何约束，就不要调用 set_constraints。
+
+### 第二步：拆目标
+目标 = 最终可交付 / 可核验的结果（"确认登录入口存在且有弱口令""拿到数据库连接串并证明可读"）。
+**不是目标**的内容（禁止列为目标）：信息收集/侦察、漏洞分析过程、攻击步骤、结果验证步骤。
+拆分原则：只有一个最终交付物 → 输出一个；存在多个相互独立的最终交付物 → 分别列出；
+能对应明确漏洞类别时标 vulnclass；**严禁臆造**用户没有提到的目标。
+用一次 set_goals 提交全部目标（不要分多次调）。
+
+### 第三步：登记授权范围（最小范围原则）
+从目标/描述里识别**明确给出**的范围，用 add_scope 登记：
+- URL 或带主机名的地址 → 取完整主机名，kind=subdomain
+  （例：https://a1b2c3.lab.example.net/path → a1b2c3.lab.example.net，**不是** example.net）
+- **严禁**把带子域的主机名缩成根域（那会把授权扩到用户目标之外）
+- 仅当用户给的是裸根域且明确说"整站/所有子域" → kind=root_domain
+- 纯 IP / 网段 → kind=ip / cidr
+- 只登记明确写出的范围；没有就不要调用 add_scope。
+
+### 顺序与收尾
+先 add_scope（如有）→ set_constraints（如有）→ set_goals（必须）。
+完成后用一句话说明：拆出了几条目标、登记了几条约束与范围，然后停止调用工具。
+`)
+	b.WriteString("\n【中间产物输出规约】本次不需要写文件；若确需临时数据，写到任务工作目录，不要写 /tmp。\n")
+	return b.String()
+}
+
+// BuildGoalsUserMessage 是第 0 轮的 user 消息：把原始输入与已知范围摊给拆解者。
+func BuildGoalsUserMessage(run *model.Run, scopes []model.Scope) string {
+	var b strings.Builder
+	b.WriteString("【任务输入（唯一的信息来源，不要添加未提及的内容）】\n")
+	fmt.Fprintf(&b, "- 目标：%s\n", run.Goal)
+	if run.Description != "" {
+		fmt.Fprintf(&b, "- 描述：%s\n", run.Description)
+	}
+	if len(scopes) > 0 {
+		b.WriteString("- 系统已按最小范围登记的条目（不要缩成更大的范围）：\n")
+		for _, sc := range scopes {
+			fmt.Fprintf(&b, "  · %s %s（来源 %s）\n", sc.Kind,
+				firstNonEmptyStr(sc.Domain, sc.Net, sc.Value), firstNonEmptyStr(sc.Source, "manual"))
+		}
+	}
+	b.WriteString("\n请按 system 里的三步执行：add_scope（如有）→ set_constraints（如有）→ set_goals（必须）。\n")
+	return b.String()
 }

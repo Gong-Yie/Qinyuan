@@ -109,6 +109,19 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 		}
 	}
 
+	// 建 run 本身也是一次"变化"：给它一个版本并给节点/边打戳，
+	// 这样"从版本 0 开始的增量"也能完整重建出初始图（属性测试会用到）。
+	rev, err := bumpVersion(ctx, tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if err := stampNodes(ctx, tx, runID, rev, originID, goalID); err != nil {
+		return nil, err
+	}
+	if err := stampEdge(ctx, tx, runID, rev, originID, model.RelSpawns, goalID); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -120,7 +133,8 @@ func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
-		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at
+		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
+		       t.goals_at
 		  FROM runs r LEFT JOIN run_tasks t ON t.run_id = r.id
 		 WHERE r.id = $1`, id)
 
@@ -131,7 +145,8 @@ func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 	var runID *int64
 	err := row.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt,
 		&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
-		&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt)
+		&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
+		&t.GoalsAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -159,7 +174,8 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
-		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at
+		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
+		       t.goals_at
 		  FROM runs r LEFT JOIN run_tasks t ON t.run_id = r.id
 		 ORDER BY r.id DESC LIMIT $1`, limit)
 	if err != nil {
@@ -175,7 +191,8 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 		var runID *int64
 		if err := rows.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt,
 			&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
-			&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt); err != nil {
+			&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
+			&t.GoalsAt); err != nil {
 			return nil, err
 		}
 		if desc != nil {

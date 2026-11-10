@@ -296,6 +296,10 @@ func TestDeadlineSettlesTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 这个用例只测超时收尾：跳过第 0 轮拆解（否则慢模型会把时间窗吃掉）。
+	if _, err := st.MarkGoalsDecomposed(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	// 模型永远在"思考"，不发工具：让收尾时确有在跑的东西。
 	slow := llm.NewFakeFactory(llm.Step{Delay: 3 * time.Second, Text: "太慢了"})
