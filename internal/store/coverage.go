@@ -31,7 +31,10 @@ func (s *Store) Coverage(ctx context.Context, runID int64) (*Coverage, error) {
 		    JOIN run_scope sc ON sc.run_id = $1 AND (
 		         (sc.kind = 'root_domain' AND e.root_domain = sc.domain) OR
 		         (sc.kind = 'subdomain'   AND e.domain = sc.domain) OR
-		         (sc.kind IN ('ip','cidr') AND sc.net >>= try_inet(e.ip)) OR
+		         -- IP 目标：runplan 为 "ip 字面量" 写的是 value（不是 net），
+		         -- 早先只按 sc.net 匹配，导致 IP 任务的覆盖度永远是 0/0。
+		         (sc.kind = 'ip'   AND e.ip <> '' AND e.ip = sc.value) OR
+		         (sc.kind = 'cidr' AND sc.net >>= try_inet(e.ip)) OR
 		         (sc.kind = 'org' AND e.owner_org_id = sc.org_id)
 		    )
 		), tested AS (

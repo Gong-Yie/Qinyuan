@@ -30,6 +30,8 @@ type Server struct {
 	Store  *store.Store
 	Engine *engine.Engine
 	Log    *slog.Logger
+	// Bus 是 SSE 的广播源；引擎落库成功后把活动推到这里。
+	Bus *Bus
 }
 
 // New 构造。
@@ -37,7 +39,12 @@ func New(st *store.Store, eng *engine.Engine, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{Store: st, Engine: eng, Log: log}
+	bus := NewBus()
+	if eng != nil {
+		// 单一发射点：engine.emit 落库成功后发布；失败不发布（客户端会用 since 从 DB 补齐）。
+		eng.Publish = bus.Publish
+	}
+	return &Server{Store: st, Engine: eng, Log: log, Bus: bus}
 }
 
 // Handler 返回路由表。
@@ -56,11 +63,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/intents", s.handleIntents)
 	mux.HandleFunc("POST /api/runs/{id}/intents", s.handleAddIntent)
 	mux.HandleFunc("GET /api/runs/{id}/activity", s.handleActivity)
+	mux.HandleFunc("GET /api/runs/{id}/activity/stream", s.handleActivityStream)
+	mux.HandleFunc("GET /api/runs/{id}/activity/{aid}", s.handleActivityItem)
 	mux.HandleFunc("GET /api/runs/{id}/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/runs/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/runs/{id}/coverage", s.handleCoverage)
 	mux.HandleFunc("GET /api/runs/{id}/tokens", s.handleTokens)
 	mux.HandleFunc("POST /api/runs/{id}/work", s.handleWork)
+
+	// 控制台静态资源（go:embed）。必须放在最后：`GET /` 会兜住所有非 API 路径。
+	mux.Handle("GET /", s.staticHandler())
 
 	return withMiddleware(mux, s.Log)
 }
@@ -90,6 +102,17 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
+
+// Flush 让 SSE 能穿过这层包装：不实现它，`w.(http.Flusher)` 会失败，
+// 表现就是"流接口 500、控制台一直显示重连中"。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap 供 http.NewResponseController 向上找真实 Writer。
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -245,6 +268,8 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{
 			"id": n.ID, "kind": n.Kind, "state": n.State, "priority": n.Priority,
 			"summary": model.TrimSummary(n.Summary(), 160), "created_at": n.CreatedAt.Unix(),
+			// payload 一并给出：步骤（step）没有 summary，正文在 payload.text / expected_evidence 里。
+			"payload": n.Payload,
 		})
 	}
 	total, _ := s.Store.CountByKind(r.Context(), id, kind)
@@ -298,11 +323,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, len(acts))
 	for _, a := range acts {
-		items = append(items, map[string]any{
-			"id": a.ID, "node_id": a.NodeID, "worker": a.Worker, "kind": a.Kind,
-			"tool": a.Tool, "tool_use_id": a.ToolUseID, "is_error": a.IsError,
-			"summary": a.Summary, "created_at": a.CreatedAt.Unix(),
-		})
+		items = append(items, activityDTO(a))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 }
@@ -504,6 +525,19 @@ func intQuery(r *http.Request, name string, def int) int {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+// intQuery64 允许 0（SSE 的 since=0 表示"不要回放"）。
+func intQuery64(r *http.Request, name string, def int64) int64 {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
 		return def
 	}
 	return n

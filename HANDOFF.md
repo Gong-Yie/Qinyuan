@@ -41,10 +41,11 @@
 | M4a | settlement 收尾轮 + compaction/micro-compact + `steer_work` 实时纠偏 | ✅ |
 | M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列（FIFO）+ 完整启动恢复 | ✅ |
 | M4c | 流式输出（SSE）+ committed 边界（未提交才可重试） | ✅ |
-| M5 | activity SSE + Next.js 静态导出 + 链路图 | ❌ 未做 |
+| M5 | activity SSE + 手写 SPA 静态导出 + `go:embed`（**不含链路图**，见 `docs/11 §6`） | ✅ |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
 
-> 当前**没有前端**：只有 JSON API + CLI。`activity` 表已经按前端需要落库（含 `tool_use_id` 配对）。
+> 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 三栏仪表盘（目标/计划/意图｜活动带｜成本/覆盖/事实），
+> 数据来自任务级 SSE（`/api/runs/{id}/activity/stream`）。链路图与覆盖图还没做。
 
 ---
 
@@ -196,7 +197,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。89 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。96 个测试。
 
 ---
 
@@ -540,7 +541,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（89 个，`*_test.go`）
+## 10. 测试（96 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -770,15 +771,25 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     有效只有 18.6k。按名义值做优化决策会去砍几乎免费的东西。
 37. **planner 空转轮先别退避**：两轮 0 意图名义成本 31k、有效只有 ~4k，而其中一轮顺带
     `prove_goal` 收了工 —— 退避会让任务晚一个心跳（≥600s）结束。理由见 `docs/10`。
+38. **中间件包 `ResponseWriter` 会让 SSE 静默坏掉**：`statusRecorder` 不实现 `Flush()`，
+    `w.(http.Flusher)` 断言失败 → 流接口 500，页面只显示"重连中"。包装时必带
+    `Flush()` 与 `Unwrap()`。
+39. **推给 SSE 的是内存对象**：`created_at` 由 DB 填，不补就是零值 —— 前端会显示公元 1 年
+    （上海 LMT 恰好是 `08:05:43`，很容易被当成时区 bug）。`emit` 成功后补 `CreatedAt`。
+40. **控制台静态资源迭代期一律 `Cache-Control: no-cache`**：`max-age=300` 会让"改了 CSS
+    刷新没变"，很容易误判成样式规则没生效（本轮就这么被坑过一次）。
+41. **IP 目标的覆盖度按 `run_scope.value` 匹配，不是 `net`**：`runplan` 给 IP 字面量只写
+    `value`，`net` 为空；只按网段匹配会让这类任务的覆盖率永远是 0/0。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+<待提交> M5：activity SSE + 控制台（手写 SPA + go:embed，docs/11）
+30fcc50 P4 观测：每节点用量 + /api/runs/{id}/tokens（docs/10）
 f51beba P4：意图级预算 + http 两档返回（docs/09）
 566e2c6 修复：种子 URL（runs.seeds）+ 意图终态回收步骤 + 判据匹配重写 + confidence 边界（docs/07、08）
-<待提交> P4 观测面：每节点用量 + /tokens 端点（docs/10）
 29e5f25 演示：M4 现场效果（假 OpenAI 流式网关 + 收尾轮/队列/删除/流式 TTFT）
 be7a1b5 M4c: 流式输出（SSE）+ committed 边界（未提交才可重试）+ TTFT 观测
 5c33ad1 M4b: 删除流水线（屏障→排水→两阶段）+ 并发准入队列（FIFO）+ 完整启动恢复
@@ -793,17 +804,16 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-P0–P4 已提交（`566e2c6`、`f51beba`）。**当前工作区未提交的是 P4 的观测面**（先 review 再提交）：
-`docs/10` + `internal/store/{activity.go,usage_test.go}` + `internal/server/server.go`（`/tokens`）+
-`cmd/qinyuan/main.go`（每节点用量）。
+P0–P4 已提交（`566e2c6`、`f51beba`、`30fcc50`）。**当前工作区未提交的是 M5 控制台**（先 review 再提交）：
+`docs/11` + `internal/server/{broadcast.go,activity_stream.go,webui.go,webui/*,stream_test.go}` +
+`internal/store/{activity.go,coverage.go,coverage_ip_test.go}` + `internal/engine/engine.go`（Publish 钩子）。
 
-M4c 已提交（`be7a1b5`），工作区干净状态见 `git status`。
-`docs/00–10` 是设计与验收记录；本文是状态快照。
+M5 之后 `docs/00–11` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 90 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 96 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

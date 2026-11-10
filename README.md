@@ -2,11 +2,12 @@
 
 授权 Web 安全测试 Agent —— Go 后端 + PostgreSQL，把探索过程外化成一张**可查询、可审计、可重启**的图，让 LLM 在图上反复"规划 → 执行 → 写回"。
 
-> **当前进度：M0 + M1 + M2 + M3a + M3.5 + M4a + M4b + M4c 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、planner（事件唤醒 / 心跳 / add_intent / prove_goal）、OpenAI 兼容 provider、超时收尾、启动恢复、**计划图（step 依赖 + 规则化 done）**、**覆盖度**、**第 0 轮目标拆解（set_goals / set_constraints / add_scope）**、**差分态势（rev 版本戳 + 增量输入 + refresh_overview）**、**收尾轮（撞预算不白跑）**、**上下文压缩**、**`steer_work` 实时纠偏**、最小 REST、CLI、端到端 demo、自动化验收都在。
+> **当前进度：M0 + M1 + M2 + M3a + M3.5 + M4a + M4b + M4c + M5 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、planner（事件唤醒 / 心跳 / add_intent / prove_goal）、OpenAI 兼容 provider、超时收尾、启动恢复、**计划图（step 依赖 + 规则化 done）**、**覆盖度**、**第 0 轮目标拆解（set_goals / set_constraints / add_scope）**、**差分态势（rev 版本戳 + 增量输入 + refresh_overview）**、**收尾轮（撞预算不白跑）**、**上下文压缩**、**`steer_work` 实时纠偏**、最小 REST、CLI、端到端 demo、自动化验收都在。
 > M4b 再补上：**删除流水线**（屏障→排水→文件暂存→DB 级联→提交后真删）、**并发准入队列**（持久化 FIFO）、**完整启动恢复**（含暂存删除收尾）。
 > M4c 再补上：**流式输出**（SSE，`tool_calls` 按 index 合并）+ **committed 边界**（未提交才可重试，已提交绝不重放）+ TTFT 观测。
-> 还没有：前端/SSE 控制台（M5）、审批门与流量录制（M6）。
-> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)。
+> M5 再补上：**控制台**（`go:embed` 手写 SPA：目标/计划/意图｜活动带｜成本/覆盖/事实）与 **activity SSE**（任务级一条流、`Last-Event-ID` 从 DB 补齐、断线自动重连）。
+> 还没有：链路图/覆盖图（M5 剩余）、审批门与流量录制（M6）。
+> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)。
 > **新接手（人或 AI）请先读 [`HANDOFF.md`](HANDOFF.md)**：环境、状态机、已修缺陷、扩展指南都在那里。
 
 ---
@@ -179,7 +180,8 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M4a~~ ✅ | settlement 收尾轮 + compaction/micro-compact + `steer_work` | 撞 `MaxTurns` 后事实仍写回；长会话不越窗；纠偏在下次工具调用前生效 |
 | ~~M4b~~ ✅ | 删除流水线 + 准入队列 + 完整启动恢复 | 删除期间无新写入；队列按 `queued_at` 补位；重启续跑 |
 | ~~M4c~~ ✅ | 流式（SSE）+ committed 边界 | 未提交可重试、已提交绝不重放；断流保留部分结果 + TTFT |
-| M5 | activity SSE + Next.js 静态导出 + `go:embed` + 链路图 | 断网 30s 回来不重复不缺口 |
+| ~~M5a~~ ✅ | activity SSE + 手写 SPA + `go:embed`（`docs/11`） | 断网 30s 回来不重复不缺口；三栏仪表盘实时跟进 |
+| M5b | 链路图 + 覆盖图（自写分层布局 / 力导向 + 折叠） | 大图不抖、可折叠展开 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | 三种 finding 分别 verified/failed/unverifiable |
 
 ---

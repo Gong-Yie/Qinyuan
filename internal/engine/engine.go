@@ -92,6 +92,10 @@ type Engine struct {
 
 	inflightMu sync.Mutex
 	inflight   map[int64]int
+
+	// Publish 由编排层注入：活动落库成功后推给 SSE 广播（可丢）。
+	// 不直接依赖 server 包 —— 引擎不知道"有没有控制台"。
+	Publish func(*model.Activity)
 }
 
 // New 装配引擎。
@@ -1049,6 +1053,14 @@ func (e *Engine) emit(ctx context.Context, a *model.Activity) {
 		id, err := e.Store.AppendActivity(writeCtx, a)
 		if err == nil {
 			a.ID = id
+			// 推给 SSE 的是内存对象：created_at 由 DB 填，这里不补就是零值，
+			// 前端会把公元 1 年显示出来（上海 LMT 恰好是 08:05:43）。
+			if a.CreatedAt.IsZero() {
+				a.CreatedAt = time.Now()
+			}
+			if e.Publish != nil {
+				e.Publish(a)
+			}
 			return
 		}
 		e.Log.Warn("[activity] 写入失败", "run", a.RunID, "kind", a.Kind, "tool", a.Tool,

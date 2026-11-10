@@ -79,6 +79,28 @@ func (s *Store) ActivityTail(ctx context.Context, runID int64, limit int) ([]*mo
 	return scanActivities(rows)
 }
 
+// ActivitiesAfter 取 id > afterID 的正序记录（SSE 断线续传用）。
+//
+// 续传语义与前端约定一致：客户端带 `since=<最后收到的 id>`，服务端从 DB 补齐缺口。
+// 广播本身是可丢的（缓冲满就丢），DB 才是完整性的来源。
+func (s *Store) ActivitiesAfter(ctx context.Context, runID, afterID int64, limit int) ([]*model.Activity, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, run_id, COALESCE(node_id,0), COALESCE(worker,''), kind, COALESCE(tool,''),
+		       COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), ''::text,
+		       metadata, COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+		       COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0), segment, created_at
+		  FROM activity WHERE run_id=$1 AND id > $2 ORDER BY id ASC LIMIT $3`,
+		runID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanActivities(rows)
+}
+
 // ActivityDetail 取单条（含 detail 全文）。
 func (s *Store) ActivityDetail(ctx context.Context, id int64) (*model.Activity, error) {
 	row := s.pool.QueryRow(ctx, `
