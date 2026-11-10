@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/runs/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/runs/{id}/coverage", s.handleCoverage)
+	mux.HandleFunc("GET /api/runs/{id}/graph", s.handleGraph)
+	mux.HandleFunc("GET /api/runs/{id}/coverage-graph", s.handleCoverageGraph)
 	mux.HandleFunc("GET /api/runs/{id}/tokens", s.handleTokens)
 	mux.HandleFunc("POST /api/runs/{id}/work", s.handleWork)
 

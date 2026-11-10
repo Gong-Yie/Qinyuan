@@ -405,7 +405,10 @@ async function renderRun() {
   S.overview = overview;
   setPage(`任务 #${id}`, run.goal);
 
-  const tabs = [['overview', '概览'], ['sessions', '会话'], ['plan', '计划'], ['cost', '成本'], ['coverage', '覆盖']];
+  const tabs = [
+    ['overview', '概览'], ['sessions', '会话'], ['graph', '链路'],
+    ['plan', '计划'], ['cost', '成本'], ['coverage', '覆盖'], ['covgraph', '覆盖图'],
+  ];
   $('view').innerHTML = `
     <div class="stack">
       <div class="card">
@@ -473,9 +476,38 @@ async function drawTab(id, tab) {
   if (!body) return;
   if (tab === 'overview') return drawOverview(id, body);
   if (tab === 'sessions') return drawSessions(id, body);
+  if (tab === 'graph') return drawGraph(id, body);
   if (tab === 'plan') return drawPlan(id, body);
   if (tab === 'cost') return drawCost(id, body);
   if (tab === 'coverage') return drawCoverage(id, body);
+  if (tab === 'covgraph') return drawCoverageGraph(id, body);
+}
+
+/* ── 链路图 / 覆盖图 ────────────────────────────────── */
+
+async function drawGraph(id, body) {
+  const data = await api(`/api/runs/${id}/graph`);
+  const sig = `${data.nodes.length}:${data.edges.length}:${data.nodes.map((n) => n.id + n.state).join(',').length}`;
+  // 结构没变就别重画：轮询每 5s 一次，重画会把用户的缩放/平移冲掉。
+  if (S.graphSig === sig && $('graph-host')) return;
+  S.graphSig = sig;
+  body.innerHTML = '<div class="card-body"><div class="graph-host" id="graph-host"></div></div>';
+  const host = $('graph-host');
+  QY_GRAPH.renderExploration(host, data, (n) => {
+    openDrawerRaw(`#${n.id} · ${n.kind}`, JSON.stringify(n, null, 2));
+  });
+}
+
+async function drawCoverageGraph(id, body) {
+  const data = await api(`/api/runs/${id}/coverage-graph`);
+  const sig = `${data.nodes.length}:${data.edges.length}`;
+  if (S.covSig === sig && $('cov-host')) return;
+  S.covSig = sig;
+  body.innerHTML = '<div class="card-body"><div class="graph-host" id="cov-host"></div></div>';
+  const host = $('cov-host');
+  QY_GRAPH.renderCoverage(host, data, (n) => {
+    openDrawerRaw(`${n.key} · ${n.kind}`, JSON.stringify(n, null, 2));
+  });
 }
 
 async function drawOverview(id, body) {
@@ -794,6 +826,11 @@ async function drawCoverage(id, body) {
           <tbody>${cov.by_kind.map((k) => `<tr><td>${k.kind}</td><td class="num">${k.total}</td><td class="num">${k.tested}</td></tr>`).join('')}</tbody>
         </table>` : empty('范围里还没有实体', '授权范围登记后，范围内的实体就是覆盖度分母。')}
       </div>
+    </div>
+    <div class="card-body" style="padding-top:0">
+      <p class="page-foot">分母 = 授权范围命中的实体；分子只认 <b>fact 锚点</b>（finding / 意图 / origin 都不算）。
+        若范围是 <code>ip</code>、而事实锚在 <code>service</code>/<code>endpoint</code> 上，覆盖率会偏低 ——
+        这是范围语义问题（见「覆盖图」里的范围外节点）。</p>
     </div>`;
 }
 
@@ -889,15 +926,19 @@ async function renderSettings() {
 
 async function openDetail(a) {
   if (!a || !S.run) return;
-  $('drawer').hidden = false;
-  $('drawer-title').textContent = `#${a.id} · ${a.kind}${a.tool ? ' · ' + a.tool : ''}`;
-  $('drawer-body').textContent = a.summary || '';
+  openDrawerRaw(`#${a.id} · ${a.kind}${a.tool ? ' · ' + a.tool : ''}`, a.summary || '');
   try {
     const d = await api(`/api/runs/${S.run.id}/activity/${a.id}`);
     $('drawer-body').textContent = d.detail || d.summary || '(无正文)';
   } catch (e) {
     $('drawer-body').textContent = `${a.summary || ''}\n\n（详情读取失败：${e.message}）`;
   }
+}
+
+function openDrawerRaw(title, text) {
+  $('drawer').hidden = false;
+  $('drawer-title').textContent = title;
+  $('drawer-body').textContent = text;
 }
 
 /* ── 启动 ────────────────────────────────────────────── */

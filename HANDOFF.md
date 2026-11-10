@@ -42,7 +42,7 @@
 | M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列（FIFO）+ 完整启动恢复 | ✅ |
 | M4c | 流式输出（SSE）+ committed 边界（未提交才可重试） | ✅ |
 | M5a | activity SSE + 仪表盘（手写 SPA + `go:embed`，IA 按 ARTEX；**不含链路图**，见 `docs/11 §6`） | ✅ |
-| M5b | 链路图 + 覆盖图（自写分层布局 / 力导向 + 折叠） | ❌ 未做 |
+| M5b | 链路图（自写分层布局）+ 覆盖图（同心圆 + 折叠） | ✅ |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
@@ -199,7 +199,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。97 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。98 个测试。
 
 ---
 
@@ -543,7 +543,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（97 个，`*_test.go`）
+## 10. 测试（98 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -792,7 +792,8 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 ## 15. 当前交付物与 git 状态
 
 ```
-<待提交> M5b 前置：仪表盘重做（按 ARTEX 的 IA）+ 发现/资产页 + /stats（docs/11）
+<待提交> M5b：链路图 + 覆盖图（自写 SVG 布局）+ 仪表盘重做（按 ARTEX 的 IA，docs/11）
+3525172 控制台重做：按 ARTEX 的仪表盘信息架构
 5963694 M5a：activity SSE + 控制台（手写 SPA + go:embed）
 30fcc50 P4 观测：每节点用量 + /api/runs/{id}/tokens（docs/10）
 f51beba P4：意图级预算 + http 两档返回（docs/09）
@@ -811,17 +812,18 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-P0–P4 与 M5a 已提交（`566e2c6`、`f51beba`、`30fcc50`、`5963694`、`32c4d23`）。
-**当前工作区未提交的是"仪表盘重做"**（第一版是仪器面板风格，被判定不是仪表盘，按 ARTEX 的
-信息架构重做）：`internal/server/webui/*`（整体重写）+ `internal/server/{dashboard.go,server.go}`
-+ `internal/store/{stats.go,listing.go,dashboard_test.go}` + `docs/11`、`docs/screenshots/*`。
+P0–P4、M5a 与仪表盘重做已提交（`566e2c6`、`f51beba`、`30fcc50`、`5963694`、`32c4d23`、`3525172`）。
+**当前工作区未提交的是 M5b（链路图 + 覆盖图）**：
+`internal/server/webui/{graph.js,app.js,index.html,styles.css}` +
+`internal/server/{graph_api.go,server.go}` + `internal/store/{graphview.go,graphview_test.go,coverage.go}` +
+`docs/11`、`docs/screenshots/m5-graph.png`、`m5-coverage-graph.png`。
 
 `docs/00–11` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 97 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 98 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

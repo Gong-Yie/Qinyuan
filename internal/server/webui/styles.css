@@ -372,6 +372,56 @@ a { color: inherit; text-decoration: none; }
 .page-foot { margin-top: 18px; font-size: 12px; color: var(--muted); }
 
 /* 抽屉 / toast */
+.graph-host { min-height: 320px; }
+.graph-wrap { display: flex; flex-direction: column; gap: 10px; }
+.graph-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.graph-toolbar .spacer { flex: 1; }
+.graph {
+  width: 100%;
+  height: 600px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(circle, var(--border) 1px, transparent 1px) 0 0 / 22px 22px,
+    var(--panel);
+  cursor: grab;
+  user-select: none;
+}
+.graph.is-panning { cursor: grabbing; }
+.gnode { overflow: visible; }
+.gnode-box {
+  box-sizing: border-box; width: 100%; height: 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--k);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px; color: var(--text);
+  cursor: pointer;
+  display: flex; flex-direction: column; gap: 3px;
+  box-shadow: var(--shadow);
+}
+.gnode-box:hover { border-color: var(--k); border-left-color: var(--k); }
+.gnode-box.is-running { box-shadow: 0 0 0 2px var(--accent-soft); }
+.gnode-top {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+}
+.gnode-kind { color: var(--k); font-weight: 600; }
+.gnode-summary {
+  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-height: 1.35;
+}
+.gnode-state { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.cnode { cursor: pointer; }
+.cnode:hover circle { stroke-width: 3; }
+.cnode-label {
+  font-size: 10.5px; fill: var(--text-2); pointer-events: none;
+  paint-order: stroke; stroke: var(--panel); stroke-width: 3px; stroke-linejoin: round;
+}
+.gedge-label { font-family: var(--mono); pointer-events: none; paint-order: stroke; stroke: var(--panel); stroke-width: 3px; stroke-linejoin: round; }
+.legend i.hollow { background: transparent; border: 1px dashed var(--muted); }
+
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(620px, 94vw);
   background: var(--panel); border-left: 1px solid var(--border);
@@ -406,3 +456,4 @@ a { color: inherit; text-decoration: none; }
   .view { padding: 16px; }
   .table .goal-cell { max-width: 200px; }
 }
+
