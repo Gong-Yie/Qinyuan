@@ -1,27 +1,43 @@
 <#
 .SYNOPSIS
-  用项目自带的 64 位 Go 执行命令（避免依赖系统 PATH 里的 32 位 Go）。
+  用 64 位 Go 执行命令（优先系统安装，其次项目自带便携版）。
 
 .DESCRIPTION
-  首次使用前先准备工具链（一次性，约 75MB）：
-    $d = "$env:LOCALAPPDATA\qinyuan\tools"
-    New-Item -ItemType Directory -Force $d | Out-Null
-    curl.exe -sL -o "$d\go.zip" https://mirrors.aliyun.com/golang/go1.26.2.windows-amd64.zip
-    tar.exe -xf "$d\go.zip" -C $d
+  背景：这台机器原先装的是 windows/386（32 位），既不能用 -race，内存上限也低。
+  现在系统里已换成 C:\Program Files\Go（windows/amd64）；本脚本负责：
+    1) 优先使用系统 64 位 Go；
+    2) 找不到时退回 %LOCALAPPDATA%\qinyuan\tools\go（便携版，无需管理员）；
+    3) 两个都不是 64 位就直接报错 —— 免得又悄悄跑回 386。
 
   用法：
     pwsh -File scripts/go.ps1 version
     pwsh -File scripts/go.ps1 test ./...
     pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo
-
-  为什么不用系统里的 Go：本机默认装的是 windows/386（32 位），
-  既不能用 -race，内存上限也低。64 位 Go 只装在用户目录，不需要管理员。
 #>
 $ErrorActionPreference = 'Stop'
 
-$go = Join-Path $env:LOCALAPPDATA 'qinyuan\tools\go\bin\go.exe'
-if (-not (Test-Path $go)) {
-    throw "未找到 64 位 Go：$go。先按脚本头部说明下载并解包。"
+function Test-Go64([string]$exe) {
+    if (-not (Test-Path $exe)) { return $false }
+    $ver = & $exe version 2>$null
+    return ($ver -match 'windows/amd64|windows/arm64')
+}
+
+$candidates = @(
+    'C:\Program Files\Go\bin\go.exe',
+    (Join-Path $env:LOCALAPPDATA 'qinyuan\tools\go\bin\go.exe')
+)
+
+$go = $null
+foreach ($c in $candidates) {
+    if (Test-Go64 $c) { $go = $c; break }
+}
+
+if (-not $go) {
+    $found = @()
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $found += (& $c version) }
+    }
+    throw "没有找到 64 位 Go。已找到：$($found -join '; ')。请安装 64 位 Go 或解包便携版到 $($candidates[1])"
 }
 
 & $go @args
