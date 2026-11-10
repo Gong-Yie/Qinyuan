@@ -120,13 +120,13 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 		MaxOutput:     w.MaxOutput,
 	}
 
-	maxTurns := w.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = 12
-	}
-	maxDuration := w.MaxDuration
-	if maxDuration <= 0 {
-		maxDuration = 10 * time.Minute
+	maxTurns, maxDuration, budgetApplied := resolveBudget(w.MaxTurns, w.MaxDuration, intent.Payload)
+	if budgetApplied {
+		emit(ctx, &model.Activity{
+			RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+			Summary:  fmt.Sprintf("本意图预算（上限）：%d 回合 / %s（planner 在 add_intent 里指定）", maxTurns, maxDuration),
+			Metadata: map[string]any{"budgeted": true, "max_turns": maxTurns, "max_seconds": int(maxDuration.Seconds())},
+		})
 	}
 	execCtx, cancel := context.WithTimeout(ctx, maxDuration)
 	defer cancel()

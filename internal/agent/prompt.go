@@ -182,6 +182,9 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
    - step_id：挂到哪个计划步骤（有计划图时必填；计划外探索用 off_plan=true）。
    - parent_ids：本方向由哪些上游 fact/finding 综合得出（可选）；顶层全新方向留空。
      只能填已存在的 fact/finding，不能填意图/目标/提示。
+   - budget：给这条方向定预算（可选，上限语义）：探索性/低把握 8 回合/300 秒；
+     已确认可深入 20 回合/900 秒；复核类 10 回合/600 秒。撞到预算会走收尾轮把已得的写回，
+     所以别把预算当成"可以不写回"的借口。
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。
 `)

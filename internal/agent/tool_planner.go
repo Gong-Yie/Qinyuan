@@ -26,7 +26,9 @@ summary 要说清"针对什么 + 做什么 + 为什么"，依赖去重靠它与�
 parent_ids 只能填已存在的【事实/发现】（从它们综合出这条方向）；顶层全新方向留空。
 asset_ids 填这条方向要处理的目标实体 id（尽量传）。
 step_id：把这条方向挂到计划图的某一步（有计划图时必填，除非 off_plan=true）。
-off_plan：显式声明"这是计划外探索"（会作为计划需要修订的信号）。`,
+off_plan：显式声明"这是计划外探索"（会作为计划需要修订的信号）。
+budget：给这条方向定预算（可选）。探索性/低把握 → 8 回合/300 秒；已确认可深入 → 20 回合/900 秒；
+复核类 → 10 回合/600 秒。不填 = 默认。它只是上限，撞到会走收尾轮并把已得的写回。`,
 		Schema: toolSpecJSON(`{
   "type": "object",
   "properties": {
@@ -41,7 +43,15 @@ off_plan：显式声明"这是计划外探索"（会作为计划需要修订的�
           "parent_ids": {"type": "array", "items": {"type": "integer"}},
           "priority": {"type": "integer", "minimum": 0, "maximum": 10},
           "step_id": {"type": "integer", "description": "挂到哪个计划步骤"},
-          "off_plan": {"type": "boolean", "description": "计划外探索（有计划图时必须显式声明）"}
+          "off_plan": {"type": "boolean", "description": "计划外探索（有计划图时必须显式声明）"},
+          "budget": {
+            "type": "object",
+            "description": "这条方向的预算上限（可选）",
+            "properties": {
+              "max_turns": {"type": "integer", "minimum": 1, "maximum": 50},
+              "max_seconds": {"type": "integer", "minimum": 30, "maximum": 3600}
+            }
+          }
         },
         "required": ["summary"]
       }
@@ -60,6 +70,10 @@ type addIntentItem struct {
 	Priority  int     `json:"priority"`
 	StepID    int64   `json:"step_id"`
 	OffPlan   bool    `json:"off_plan"`
+	Budget    struct {
+		MaxTurns   int `json:"max_turns"`
+		MaxSeconds int `json:"max_seconds"`
+	} `json:"budget"`
 }
 
 func handleAddIntent(ctx context.Context, rc *Context, raw json.RawMessage) (Result, error) {
@@ -106,6 +120,7 @@ func handleAddIntent(ctx context.Context, rc *Context, raw json.RawMessage) (Res
 		id, err := rc.Store.AddIntent(ctx, store.AddIntentInput{
 			RunID: rc.RunID, Summary: it.Summary, AssetIDs: it.AssetIDs,
 			ParentIDs: it.ParentIDs, Priority: it.Priority, Origin: "planner",
+			BudgetTurns: it.Budget.MaxTurns, BudgetSeconds: it.Budget.MaxSeconds,
 		})
 		if err != nil {
 			results = append(results, result{Index: i, Summary: it.Summary, Error: err.Error()})

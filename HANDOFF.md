@@ -196,7 +196,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。86 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。89 个测试。
 
 ---
 
@@ -540,7 +540,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（86 个，`*_test.go`）
+## 10. 测试（89 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -762,13 +762,18 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     必须要求"有区分度"，别写「登录」「表单」这种单位词。
 33. **`observed` 只允许表示"直接看到"**：靠缺失、差异、时序、排除法推出来的结论一律 `inferred`。
     证据门槛挡不住"证据不支持结论"，这一层只能靠 prompt 语义约束。
+34. **意图预算只能收紧、不能放大**：`resolveBudget` 取 `min(任务配置, 意图预算)`，配置是天花板；
+    越界值夹边界而不是报错 —— 预算是优化项，不该让一次执行直接失败。
+35. **http 响应体默认只回 4KB + 落盘指针**：200KB 的 HTML 按 `MaxOutput` 全额回会吃掉
+    1/5 个窗口。要全文显式传 `full=true`，别把它做成默认。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
-<待提交> 修复：种子 URL（runs.seeds）+ 意图终态回收步骤 + 判据匹配重写 + confidence 边界（docs/07、08）
+566e2c6 修复：种子 URL（runs.seeds）+ 意图终态回收步骤 + 判据匹配重写 + confidence 边界（docs/07、08）
+<待提交> P4：意图级预算 + http 两档返回（docs/09）
 29e5f25 演示：M4 现场效果（假 OpenAI 流式网关 + 收尾轮/队列/删除/流式 TTFT）
 be7a1b5 M4c: 流式输出（SSE）+ committed 边界（未提交才可重试）+ TTFT 观测
 5c33ad1 M4b: 删除流水线（屏障→排水→两阶段）+ 并发准入队列（FIFO）+ 完整启动恢复
@@ -783,20 +788,18 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-**当前工作区未提交的是两轮修复**（先 review 再提交）：
-
-- P0/P1（`docs/07`）：`internal/store/{schema.sql,runs.go,graph.go,step_reconcile.go}` +
-  `internal/runplan/runplan.go` + `internal/model/model.go` + `internal/agent/prompt.go`；
-- P2/P3（`docs/08`）：`internal/store/plans.go`（`expectedMatches` 重写）+ `internal/agent/{prompt.go,tool_plan.go,tool_write.go}`；
-- 两者共新增 6 个测试文件（runplan / store×3 / agent×2）。
+P0–P3 已提交（`566e2c6`）。**当前工作区未提交的是 P4**（先 review 再提交）：
+`docs/09` + `internal/agent/{budget.go,worker.go,tool_http.go,tools.go,tool_planner.go,prompt.go}` +
+`internal/store/graph.go`（意图预算字段）+ 3 个测试文件（budget×2、http 两档×1）。
+三轮修复共新增 9 个测试文件。
 
 M4c 已提交（`be7a1b5`），工作区干净状态见 `git status`。
-`docs/00–08` 是设计与验收记录；本文是状态快照。
+`docs/00–09` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 86 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 89 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

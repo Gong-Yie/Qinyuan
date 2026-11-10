@@ -44,6 +44,10 @@ type AddIntentInput struct {
 	ParentIDs []int64
 	Priority  int
 	Origin    string
+	// Budget 是 planner 给这条方向定的预算（0 = 不设）。
+	// 它只是上限：执行时与任务配置取 min，撞到走收尾轮。
+	BudgetTurns   int
+	BudgetSeconds int
 }
 
 // AddIntent 创建意图并连边。
@@ -99,10 +103,17 @@ func (s *Store) AddIntent(ctx context.Context, in AddIntentInput) (int64, error)
 		}
 	}
 
-	payload, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"summary":   in.Summary,
 		"asset_ids": in.AssetIDs,
-	})
+	}
+	if in.BudgetTurns > 0 || in.BudgetSeconds > 0 {
+		fields["budget"] = map[string]any{
+			"max_turns":   in.BudgetTurns,
+			"max_seconds": in.BudgetSeconds,
+		}
+	}
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return 0, err
 	}

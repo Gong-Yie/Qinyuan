@@ -100,6 +100,8 @@ type httpInput struct {
 	Headers   map[string]string `json:"headers"`
 	Body      string            `json:"body"`
 	TimeoutMS int               `json:"timeout_ms"`
+	// Full 要求把响应体按 MaxOutput 全量回给模型（默认只回开头一段 + 落盘指针）。
+	Full bool `json:"full"`
 }
 
 type httpOutput struct {
@@ -107,11 +109,18 @@ type httpOutput struct {
 	Headers     map[string]string `json:"headers"`
 	Body        string            `json:"body"`
 	BodyBytes   int64             `json:"body_bytes"`
+	BodyInline  int               `json:"body_inline_limit"`
 	DurationMS  int64             `json:"duration_ms"`
 	FinalURL    string            `json:"final_url"`
 	Truncated   bool              `json:"truncated"`
 	RequestLine string            `json:"request_line"`
 }
+
+// httpInlineBodyBytes 是响应体默认回给模型的字节上限（完整内容落盘，带指针）。
+//
+// 为什么单独一档：一个 200KB 的 HTML 如果按 MaxOutput（30k 字符）回给模型，
+// 一次调用就吃掉 1/5 个上下文窗口，而绝大多数判断只看得到前几 KB（状态码/标题/表单）。
+const httpInlineBodyBytes = 4096
 
 // NewHTTPTool 是第一个真实能力工具：发一个 HTTP 请求并把响应交回模型。
 //
@@ -123,7 +132,8 @@ func NewHTTPTool() *Tool {
 		Description: `对本任务授权范围内的目标发一个 HTTP 请求，返回状态码、响应头与响应体。
 用途：验证页面/接口的实际行为（是否存在、返回什么、报什么错）。
 规则：① 只对授权范围内主机发请求，范围外一律被拒绝；② 同一 URL 不要反复请求，先看已有事实；
-③ 响应体超过上限会落盘并给出路径，用 Read 取全文；④ 不要用它做破坏性操作（写/删/爆破）。`,
+③ 响应体默认只回前 4KB（完整内容落盘，路径写在 body 末尾），需要全文时传 full=true；
+④ 不要用它做破坏性操作（写/删/爆破）。`,
 		ReadOnly: false,
 		Schema: toolSpecJSON(`{
   "type": "object",
@@ -132,7 +142,8 @@ func NewHTTPTool() *Tool {
     "url": {"type": "string", "description": "完整 URL（http/https）"},
     "headers": {"type": "object", "description": "请求头键值对", "additionalProperties": {"type": "string"}},
     "body": {"type": "string", "description": "请求体（POST/PUT 时用）"},
-    "timeout_ms": {"type": "integer", "description": "超时毫秒，默认 20000，上限 60000"}
+    "timeout_ms": {"type": "integer", "description": "超时毫秒，默认 20000，上限 60000"},
+    "full": {"type": "boolean", "description": "要完整响应体（默认只回前 4KB + 落盘指针）"}
   },
   "required": ["url"]
 }`),
@@ -217,11 +228,19 @@ func handleHTTPRequest(ctx context.Context, rc *Context, raw json.RawMessage) (R
 		headers[k] = resp.Header.Get(k)
 	}
 	text := string(body)
+	inlineLimit := httpInlineBodyBytes
+	if in.Full {
+		inlineLimit = rc.MaxOutput
+		if inlineLimit < httpInlineBodyBytes {
+			inlineLimit = httpInlineBodyBytes
+		}
+	}
 	out := httpOutput{
 		Status:      resp.StatusCode,
 		Headers:     headers,
-		Body:        clampOutput(rc, "http_body", text),
+		Body:        clampOutputN(rc, "http_body", text, inlineLimit),
 		BodyBytes:   int64(len(body)),
+		BodyInline:  inlineLimit,
 		DurationMS:  elapsed.Milliseconds(),
 		FinalURL:    resp.Request.URL.String(),
 		Truncated:   truncated,

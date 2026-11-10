@@ -198,6 +198,15 @@ func clampOutput(rc *Context, kind, content string) string {
 	if limit <= 0 {
 		limit = 30000
 	}
+	return clampOutputN(rc, kind, content, limit)
+}
+
+// clampOutputN 是 clampOutput 的"指定更小上限"版本：用于 http 响应这类
+// "大多数时候只需要看开头"的内容（两档返回：head + 落盘全文）。
+func clampOutputN(rc *Context, kind, content string, limit int) string {
+	if limit <= 0 {
+		limit = 30000
+	}
 	if len(content) <= limit {
 		return content
 	}
