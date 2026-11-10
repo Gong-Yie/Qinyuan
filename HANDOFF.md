@@ -45,7 +45,7 @@
 | M5b | 链路图（自写分层布局）+ 覆盖图（同心圆 + 折叠） | ✅ |
 | M6a | 审批门（规则 → 人工挂起；默认只对 DELETE/PUT/PATCH 要审批） | ✅ |
 | M6b | 流量录制（工具层录制 + PG 索引 + 证据快照；**不做代理**，见 `docs/13 §1`） | ✅ |
-| M6c | finding 复测 + 报告 | ❌ 未做 |
+| M6c | finding 复测（重放+断言，三档结论）+ Markdown 报告 | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -201,7 +201,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。108 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。110 个测试。
 
 ---
 
@@ -545,7 +545,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（108 个，`*_test.go`）
+## 10. 测试（110 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -801,13 +801,20 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 49. **失败的请求也要录**：`status=0 + error` 是"当时打不通"的可复核证据，
     只记成功的流量会让报告里的失败结论无据可查。
 50. **检索只覆盖 ≤8KB 预览**：更大正文落内容寻址文件，要原文得用 `traffic_get` 按 offset 读文件。
+51. **`AddRetest` 只回 id，不回 `created_at`**：接口直接回内存对象时时间戳是 0
+    （页面显示 1970）。落库后要补 `CreatedAt`，或统一从 DB 重读。
+52. **中文引号别写进 Go 字符串**：报告模板里 `"重放当时的目标状态"` 会让整个文件语法错误
+    （`missing ',' in argument list`）。用「」或转义。
+53. **psql 命令行传中文会炸**（client_encoding）：seed SQL 写成 UTF-8 文件 + `psql -f`，
+    并设 `PGCLIENTENCODING=UTF8`。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
-<待提交> M6b：流量录制（工具层录制 + PG 索引，docs/13）
+<待提交> M6c：finding 复测 + Markdown 报告（docs/14）
+ad9ba16 M6b：流量录制（工具层录制 + PG 索引）
 a5662fd M6a：审批门（规则 → 人工挂起）
 138aa6d M5b：链路图 + 覆盖图（自写 SVG 布局）
 3525172 控制台重做：按 ARTEX 的仪表盘信息架构
@@ -830,17 +837,17 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 ```
 
 P0–P4、M5a、M5b 已提交（`566e2c6`…`138aa6d`）。
-**当前工作区未提交的是 M6b（流量录制）**：
-`internal/store/{schema.sql,traffic.go,traffic_test.go}` + `internal/agent/{traffic.go,tool_traffic.go,traffic_test.go,tool_http.go,tools.go,worker.go,tool_write.go,prompt.go,tool_planner.go}` +
-`internal/server/{traffic_api.go,server.go}` + `internal/server/webui/app.js` +
-`docs/13`、`docs/screenshots/m6-traffic.png`。
+**当前工作区未提交的是 M6c（复测 + 报告）**：
+`internal/store/{schema.sql,retest.go}` + `internal/agent/{retest.go,retest_test.go}` +
+`internal/server/{retest_api.go 的一部分（report.go）,server.go}` + `cmd/qinyuan/main.go`（`retest` 子命令）+
+`internal/server/webui/app.js`（发现页复测、任务头报告）+ `docs/14`、`docs/screenshots/m6-retest.png`。
 
-`docs/00–13` 是设计与验收记录；本文是状态快照。
+`docs/00–14` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 108 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 110 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

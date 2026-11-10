@@ -427,6 +427,7 @@ async function renderRun() {
           <div class="detail-actions">
             ${run.can_pause ? `<button class="btn" data-act="pause">暂停</button>` : ''}
             ${run.can_resume ? `<button class="btn" data-act="resume">恢复</button>` : ''}
+            <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告</a>
             <a class="btn btn-ghost" href="#/runs">返回列表</a>
           </div>
         </div>
@@ -466,6 +467,7 @@ async function renderRun() {
         const acts = head.querySelector('.detail-actions');
         acts.innerHTML = `${r.can_pause ? '<button class="btn" data-act="pause">暂停</button>' : ''}
           ${r.can_resume ? '<button class="btn" data-act="resume">恢复</button>' : ''}
+          <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告</a>
           <a class="btn btn-ghost" href="#/runs">返回列表</a>`;
         acts.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => control(id, b.dataset.act)));
       }
@@ -912,19 +914,52 @@ async function renderFindings() {
 function drawFindings() {
   $('view').innerHTML = `<div class="card">
     ${S.findings.length ? `<table class="table">
-      <thead><tr><th>名称</th><th style="width:90px">等级</th><th>所属任务</th><th>目标</th><th>时间</th></tr></thead>
+      <thead><tr><th>名称</th><th style="width:90px">等级</th><th>所属任务</th><th>目标</th><th>时间</th><th style="width:170px">复测</th></tr></thead>
       <tbody>${S.findings.map((f) => `<tr class="is-clickable" data-run="${f.run_id}">
         <td>${esc(f.name || f.summary)}</td>
         <td>${f.severity ? `<span class="badge badge-failed">${esc(f.severity)}</span>` : '<span class="muted">—</span>'}</td>
         <td class="goal-cell"><span class="muted">#${f.run_id} ${esc(f.run_goal)}</span></td>
         <td class="mono muted">${esc(f.entity || '—')}</td>
         <td class="muted">${fmtDate(f.created_at)}</td>
+        <td><span class="retest-slot" data-slot="${f.run_id}:${f.id}"><span class="muted">—</span></span>
+          <button class="btn btn-sm" data-retest="${f.id}" data-r="${f.run_id}">复测</button></td>
       </tr>`).join('')}</tbody>
     </table>` : empty('还没有发现', 'worker 只有在<b>真实触发并拿到证据</b>时才会上报 finding；疑似一律记 fact。')}
   </div>`;
   document.querySelectorAll('[data-run]').forEach((row) => {
-    row.addEventListener('click', () => { location.hash = `#/runs/${row.dataset.run}/overview`; });
+    row.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
+      location.hash = `#/runs/${row.dataset.run}/overview`;
+    });
   });
+  document.querySelectorAll('[data-retest]').forEach((btn) => {
+    btn.addEventListener('click', () => retestFinding(Number(btn.dataset.r), Number(btn.dataset.retest), btn));
+  });
+}
+
+// retestFinding 调复测并就地显示结论（verified / failed / unverifiable）。
+async function retestFinding(runId, findingId, btn) {
+  btn.disabled = true;
+  btn.textContent = '复测中…';
+  try {
+    const res = await api(`/api/runs/${runId}/findings/${findingId}/retest`, { method: 'POST' });
+    const first = (res.items || [])[0];
+    const slot = document.querySelector(`[data-slot="${runId}:${findingId}"]`);
+    if (slot && first) {
+      const cls = first.status === 'verified' ? 'badge-done'
+        : first.status === 'failed' ? 'badge-failed' : 'badge-paused';
+      const label = first.status === 'verified' ? '已验证'
+        : first.status === 'failed' ? '已失效' : '无法判定';
+      slot.innerHTML = `<span class="badge ${cls}">${label}</span>`;
+      slot.title = first.observed || '';
+    }
+    toast(first ? `${first.status}：${first.observed || ''}`.slice(0, 90) : '复测完成');
+  } catch (e) {
+    toast('复测失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '复测';
+  }
 }
 
 async function renderAssets() {

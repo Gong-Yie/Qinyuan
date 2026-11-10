@@ -489,3 +489,23 @@ BEGIN
   END LOOP;
 END $$;
 
+
+-- ---------------------------------------------------------------------------
+-- M6c：finding 复测
+--
+-- 复测 = 用 finding 绑定的那条交换重放一次，按断言给 verified / failed / unverifiable。
+-- 不能只回"看起来还在"：状态码、响应体指纹（sha/长度）都要留 expected/observed 供复核。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS finding_retests (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    finding_id  BIGINT NOT NULL,
+    exchange_id BIGINT,
+    status      TEXT NOT NULL CHECK (status IN ('verified','failed','unverifiable')),
+    expected    TEXT NOT NULL DEFAULT '',
+    observed    TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    duration_ms INT NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_retests_finding ON finding_retests(run_id, finding_id, id DESC);
