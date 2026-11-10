@@ -47,6 +47,7 @@
 | M6b | 流量录制（工具层录制 + PG 索引 + 证据快照；**不做代理**，见 `docs/13 §1`） | ✅ |
 | M6c | finding 复测（重放+断言，三档结论）+ Markdown 报告 | ✅ |
 | M7 | 平台化七件套：trace / outbox / GraphStore+memstore / 战役 / 审批 SLA / 可复现报告 / 连接器（见 `docs/15`） | ✅（部分到 S1–S2，见该文 §0） |
+| M8 | 控制台补齐（战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批）+ P2-4 S3 DTO 迁移（`docs/16`） | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -164,7 +165,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 04-M4a-撞预算不白跑.md
 │   ├── 05-M4b-删除与准入.md
 │   ├── 06-M4c-流式与committed.md
-│   └── 15-M7-平台化七件套.md    trace / outbox / GraphStore / 战役 / 审批SLA / 报告 / 连接器
+│   ├── 15-M7-平台化七件套.md    trace / outbox / GraphStore / 战役 / 审批SLA / 报告 / 连接器
+│   └── 16-M8-控制台与DTO迁移.md  战役页 / 运维页 / 时间线 Tab / 批量审批 / DTO 迁 model
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -856,6 +858,9 @@ P0–P4、M5a、M5b、M6 已提交（`566e2c6`…`62e5a5f`）。
 approval_policies+grants / campaigns+campaign_scope / connector_deliveries；
 新包 `internal/{trace,outbox,connectors,report,graphstore/graphstore,graphstore/memstore}`；
 新 API 见 `docs/15 §9`。工作区应为干净（`git status` 无改动）。
+**M8 已提交**：控制台新增战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批；
+`Coverage/PlanGraph/StepView/CampaignView` 类型迁到 `internal/model/views.go`（store 里留别名），
+`graphstore` 不再 import `store`（断言挪到 `store/graphstore_assert.go`）。见 `docs/16`。
 
 `docs/00–15` 是设计与验收记录；本文是状态快照。
 

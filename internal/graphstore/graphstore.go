@@ -19,7 +19,6 @@ import (
 	"context"
 
 	"qinyuan/internal/model"
-	"qinyuan/internal/store"
 )
 
 // Graph 是构建"态势"所需的最小图访问面。
@@ -32,10 +31,10 @@ type Graph interface {
 	CountIntentState(ctx context.Context, runID int64, state string) (int, error)
 	HasActiveIntent(ctx context.Context, runID int64) (bool, error)
 	ListEntitiesForRun(ctx context.Context, runID int64, limit int) ([]*model.Entity, error)
-	PlanGraph(ctx context.Context, runID int64) (*store.PlanGraph, error)
-	Coverage(ctx context.Context, runID int64) (*store.Coverage, error)
-	CampaignViewForRun(ctx context.Context, runID int64) (*store.CampaignView, error)
+	PlanGraph(ctx context.Context, runID int64) (*model.PlanGraph, error)
+	Coverage(ctx context.Context, runID int64) (*model.Coverage, error)
+	CampaignViewForRun(ctx context.Context, runID int64) (*model.CampaignView, error)
 }
 
-// 编译期断言：真实存储必须满足接口（改签名会在这里炸，而不是在调用点）。
-var _ Graph = (*store.Store)(nil)
+// 编译期断言放在实现方（internal/store/graphstore_assert.go）：
+// 契约包不 import 具体实现，依赖才真的指向"实现 → 契约"。

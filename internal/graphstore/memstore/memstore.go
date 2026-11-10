@@ -7,10 +7,10 @@ package memstore
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"qinyuan/internal/model"
-	"qinyuan/internal/store"
 )
 
 // Store 是一份内存图。
@@ -22,9 +22,9 @@ type Store struct {
 	nodes    map[int64][]*model.Node
 	edges    map[int64][]model.Edge
 	entities map[int64][]*model.Entity
-	plan     map[int64]*store.PlanGraph
-	coverage map[int64]*store.Coverage
-	campaign map[int64]*store.CampaignView
+	plan     map[int64]*model.PlanGraph
+	coverage map[int64]*model.Coverage
+	campaign map[int64]*model.CampaignView
 
 	nextID int64
 }
@@ -34,8 +34,8 @@ func New() *Store {
 	return &Store{
 		runs: map[int64]*model.Run{}, scopes: map[int64][]model.Scope{},
 		nodes: map[int64][]*model.Node{}, edges: map[int64][]model.Edge{},
-		entities: map[int64][]*model.Entity{}, plan: map[int64]*store.PlanGraph{},
-		coverage: map[int64]*store.Coverage{}, campaign: map[int64]*store.CampaignView{},
+		entities: map[int64][]*model.Entity{}, plan: map[int64]*model.PlanGraph{},
+		coverage: map[int64]*model.Coverage{}, campaign: map[int64]*model.CampaignView{},
 		nextID: 100,
 	}
 }
@@ -75,21 +75,21 @@ func (s *Store) AddEntity(runID int64, e *model.Entity) {
 }
 
 // SetPlan 预置计划图。
-func (s *Store) SetPlan(runID int64, pg *store.PlanGraph) {
+func (s *Store) SetPlan(runID int64, pg *model.PlanGraph) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.plan[runID] = pg
 }
 
 // SetCoverage 预置覆盖度。
-func (s *Store) SetCoverage(runID int64, c *store.Coverage) {
+func (s *Store) SetCoverage(runID int64, c *model.Coverage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.coverage[runID] = c
 }
 
 // SetCampaignView 预置战役视图。
-func (s *Store) SetCampaignView(runID int64, v *store.CampaignView) {
+func (s *Store) SetCampaignView(runID int64, v *model.CampaignView) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.campaign[runID] = v
@@ -101,7 +101,7 @@ func (s *Store) Run(_ context.Context, runID int64) (*model.Run, error) {
 	defer s.mu.Unlock()
 	r, ok := s.runs[runID]
 	if !ok {
-		return nil, store.ErrNotFound
+		return nil, fmt.Errorf("memstore: run %d 不存在", runID)
 	}
 	return r, nil
 }
@@ -189,27 +189,27 @@ func (s *Store) ListEntitiesForRun(_ context.Context, runID int64, limit int) ([
 }
 
 // PlanGraph 读计划图（没有就是空视图，与真实 store 一致）。
-func (s *Store) PlanGraph(_ context.Context, runID int64) (*store.PlanGraph, error) {
+func (s *Store) PlanGraph(_ context.Context, runID int64) (*model.PlanGraph, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if pg, ok := s.plan[runID]; ok {
 		return pg, nil
 	}
-	return &store.PlanGraph{}, nil
+	return &model.PlanGraph{}, nil
 }
 
 // Coverage 读覆盖度（没有就是 0/0）。
-func (s *Store) Coverage(_ context.Context, runID int64) (*store.Coverage, error) {
+func (s *Store) Coverage(_ context.Context, runID int64) (*model.Coverage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.coverage[runID]; ok {
 		return c, nil
 	}
-	return &store.Coverage{}, nil
+	return &model.Coverage{}, nil
 }
 
 // CampaignViewForRun 读战役视图（默认 nil = 独立任务）。
-func (s *Store) CampaignViewForRun(_ context.Context, runID int64) (*store.CampaignView, error) {
+func (s *Store) CampaignViewForRun(_ context.Context, runID int64) (*model.CampaignView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.campaign[runID], nil

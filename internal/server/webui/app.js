@@ -151,6 +151,9 @@ function parseHash() {
   if (seg[0] === 'findings') return { name: 'findings' };
   if (seg[0] === 'assets') return { name: 'assets' };
   if (seg[0] === 'approvals') return { name: 'approvals' };
+  if (seg[0] === 'campaigns' && seg[1]) return { name: 'campaign', campId: Number(seg[1]) };
+  if (seg[0] === 'campaigns') return { name: 'campaigns' };
+  if (seg[0] === 'ops') return { name: 'ops' };
   if (seg[0] === 'settings') return { name: 'settings' };
   return { name: 'dashboard' };
 }
@@ -169,6 +172,9 @@ async function route() {
       case 'findings': await renderFindings(); break;
       case 'assets': await renderAssets(); break;
       case 'approvals': await renderApprovals(); break;
+      case 'campaigns': await renderCampaigns(); break;
+      case 'campaign': await renderCampaign(); break;
+      case 'ops': await renderOps(); break;
       case 'settings': await renderSettings(); break;
       default: await renderDashboard();
     }
@@ -383,6 +389,16 @@ function runRow(r) {
 
 async function control(id, action) {
   if (action === 'open') { location.hash = `#/runs/${id}`; return; }
+  // M8：CI 导出 / 工单同步不走 /control（它们是集成动作，不是任务生命周期）。
+  if (action === 'ci' || action === 'sync') {
+    try {
+      const r = await api(`/api/runs/${id}/${action === 'ci' ? 'ci-export' : 'sync-tickets'}`, { method: 'POST' });
+      toast(action === 'ci'
+        ? `CI 包已导出：${r.count} 个文件 → ${r.dir}`
+        : `已回写 ${r.applied} 条工单状态`);
+    } catch (e) { toast('操作失败：' + e.message); }
+    return;
+  }
   try {
     await api(`/api/runs/${id}/control`, {
       method: 'POST',
@@ -410,7 +426,7 @@ async function renderRun() {
 
   const tabs = [
     ['overview', '概览'], ['sessions', '会话'], ['traffic', '流量'], ['graph', '链路'],
-    ['plan', '计划'], ['cost', '成本'], ['coverage', '覆盖'], ['covgraph', '覆盖图'],
+    ['plan', '计划'], ['timeline', '时间线'], ['cost', '成本'], ['coverage', '覆盖'], ['covgraph', '覆盖图'],
   ];
   $('view').innerHTML = `
     <div class="stack">
@@ -425,10 +441,7 @@ async function renderRun() {
             <span>创建 <b>${fmtDate(run.created_at)}</b></span>
           </div>
           <div class="detail-actions">
-            ${run.can_pause ? `<button class="btn" data-act="pause">暂停</button>` : ''}
-            ${run.can_resume ? `<button class="btn" data-act="resume">恢复</button>` : ''}
-            <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告</a>
-            <a class="btn btn-ghost" href="#/runs">返回列表</a>
+            ${runActions(run, id)}
           </div>
         </div>
         <div class="tabs" id="run-tabs">
@@ -465,10 +478,7 @@ async function renderRun() {
           <span>超时 <b>${r.timeout_seconds ? r.timeout_seconds + 's' : '不限'}</b></span>
           <span>创建 <b>${fmtDate(r.created_at)}</b></span>`;
         const acts = head.querySelector('.detail-actions');
-        acts.innerHTML = `${r.can_pause ? '<button class="btn" data-act="pause">暂停</button>' : ''}
-          ${r.can_resume ? '<button class="btn" data-act="resume">恢复</button>' : ''}
-          <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告</a>
-          <a class="btn btn-ghost" href="#/runs">返回列表</a>`;
+        acts.innerHTML = runActions(r, id);
         acts.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => control(id, b.dataset.act)));
       }
       if (S.route.tab !== 'sessions') await drawTab(id, S.route.tab);
@@ -484,6 +494,7 @@ async function drawTab(id, tab) {
   if (tab === 'traffic') return drawTraffic(id, body);
   if (tab === 'graph') return drawGraph(id, body);
   if (tab === 'plan') return drawPlan(id, body);
+  if (tab === 'timeline') return drawTimeline(id, body);
   if (tab === 'cost') return drawCost(id, body);
   if (tab === 'coverage') return drawCoverage(id, body);
   if (tab === 'covgraph') return drawCoverageGraph(id, body);
@@ -1007,8 +1018,17 @@ async function renderApprovals() {
           <h2 class="card-title">待处理<small>${(pending.items || []).length}</small></h2>
           <span class="muted">工具调用会一直阻塞，直到你决定或超时</span>
         </div>
+        ${(pending.items || []).length ? `<div class="toolbar" style="padding:12px 16px 0">
+          <label class="muted" style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" id="ap-all" /> 全选
+          </label>
+          <button class="btn btn-primary btn-sm" id="ap-approve">批量批准</button>
+          <button class="btn btn-danger btn-sm" id="ap-deny">批量拒绝</button>
+          <span class="muted">冲突项（已被别人处理 / 已超时）不会被覆盖</span>
+        </div>` : ''}
         ${(pending.items || []).length ? (pending.items || []).map((p) => `
           <div class="row-item">
+            <input type="checkbox" class="ap-check" value="${p.id}" />
             <span class="state-dot running"></span>
             <div class="row-main">
               <div class="row-title"><b class="mono">#${p.id}</b> · <span class="mono">${esc(p.tool)}</span>
@@ -1068,6 +1088,30 @@ async function renderApprovals() {
       decideApproval(Number(b.dataset.deny), 'denied', reason);
     });
   });
+
+  // P3-4：批量决定（逐条 CAS，冲突项不覆盖）
+  const allBox = $('ap-all');
+  if (allBox) {
+    allBox.addEventListener('change', () => {
+      document.querySelectorAll('.ap-check').forEach((c) => { c.checked = allBox.checked; });
+    });
+  }
+  const batch = async (decision) => {
+    const ids = [...document.querySelectorAll('.ap-check')].filter((c) => c.checked).map((c) => Number(c.value));
+    if (!ids.length) { toast('先勾选要处理的审批'); return; }
+    if (decision === 'denied' && !window.confirm(`拒绝 ${ids.length} 条？拒绝原因会写进每条记录。`)) return;
+    try {
+      const r = await api('/api/approvals/batch-decide', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, decision, reason: decision === 'denied' ? '批量拒绝' : '' }),
+      });
+      toast(`成功 ${r.ok} 条${r.conflict && r.conflict.length ? `，冲突 ${r.conflict.length} 条（#${r.conflict.join(', #')}）` : ''}`);
+      await pollGlobal();
+      await renderApprovals();
+    } catch (e) { toast('批量处理失败：' + e.message); }
+  };
+  if ($('ap-approve')) $('ap-approve').addEventListener('click', () => batch('allowed'));
+  if ($('ap-deny')) $('ap-deny').addEventListener('click', () => batch('denied'));
 
   S.refresh = async () => { if (S.route && S.route.name === 'approvals') await renderApprovals(); };
 }
@@ -1137,6 +1181,456 @@ function openDrawerRaw(title, text) {
   $('drawer').hidden = false;
   $('drawer-title').textContent = title;
   $('drawer-body').textContent = text;
+}
+
+/* ── M8：时间线 / 战役 / 运维 ───────────────────────── */
+
+function runActions(run, id) {
+  return `${run.can_pause ? '<button class="btn" data-act="pause">暂停</button>' : ''}
+    ${run.can_resume ? '<button class="btn" data-act="resume">恢复</button>' : ''}
+    <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告 MD</a>
+    <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report?format=html">HTML</a>
+    <a class="btn btn-ghost" href="/api/runs/${id}/report?format=zip&download=1">报告包</a>
+    <button class="btn btn-ghost" data-act="ci">CI 导出</button>
+    <button class="btn btn-ghost" data-act="sync">同步工单</button>
+    <a class="btn btn-ghost" href="#/runs">返回列表</a>`;
+}
+
+const CAMP_LABEL = { active: '进行中', paused: '已暂停', done: '已完成', archived: '已归档' };
+const campBadge = (st) => {
+  const k = st === 'active' ? 'running' : st === 'paused' ? 'paused' : st === 'done' ? 'done' : 'idle';
+  return `<span class="badge badge-${k}">${CAMP_LABEL[st] || st || '未知'}</span>`;
+};
+
+/* 时间线：span 树 + 分位统计（P2-5） */
+async function drawTimeline(id, body) {
+  const minMs = S.tlMinMs || 0;
+  const data = await api(`/api/runs/${id}/timeline?stats=1&limit=2000${minMs ? '&min_ms=' + minMs : ''}`);
+  const spans = data.spans || [];
+  const stats = data.by_name || [];
+  let maxMs = 1;
+  const walk = (ns) => (ns || []).forEach((n) => {
+    maxMs = Math.max(maxMs, n.duration_ms || 0);
+    walk(n.children);
+  });
+  walk(spans);
+
+  const row = (n, depth) => {
+    const w = Math.max(2, Math.round(((n.duration_ms || 0) / maxMs) * 100));
+    const attrs = esc(JSON.stringify(n.attrs || {}, null, 1));
+    const mark = n.children && n.children.length ? '▾' : '·';
+    return `<div class="tl-row" data-attrs="${attrs}" title="点开看属性">
+      <span class="tl-name" style="padding-left:${14 + depth * 18}px">${mark} ${esc(n.span)}</span>
+      <span class="tl-bar-wrap"><span class="tl-bar ${n.error ? 'tl-bar-err' : ''}" style="display:block;width:${w}%"></span></span>
+      <span class="tl-dur ${n.error ? 'tl-err' : ''}">${n.duration_ms}ms</span>
+    </div>${(n.children || []).map((c) => row(c, depth + 1)).join('')}`;
+  };
+
+  body.innerHTML = `
+    <div class="card-body" style="padding:0">
+      <div class="toolbar" style="padding:12px 16px 0">
+        <input class="search" id="tl-min" type="number" min="0" placeholder="只显示 ≥ N ms" value="${minMs || ''}" />
+        <button class="btn" id="tl-apply">过滤</button>
+        <span class="muted">trace <code>${esc(data.trace || '')}</code> · ${data.count || 0} 个 span</span>
+      </div>
+      ${stats.length ? `<div class="card-body" style="padding:8px 16px 0">
+        <table class="table">
+          <thead><tr><th>span</th><th class="num">次数</th><th class="num">p50</th><th class="num">p95</th><th class="num">p99</th><th class="num">最长</th><th class="num">错误</th></tr></thead>
+          <tbody>${stats.map((s) => `<tr>
+            <td class="mono">${esc(s.span)}</td>
+            <td class="num">${s.count}</td>
+            <td class="num">${Math.round(s.p50_ms)}ms</td>
+            <td class="num">${Math.round(s.p95_ms)}ms</td>
+            <td class="num">${Math.round(s.p99_ms)}ms</td>
+            <td class="num">${s.max_ms}ms</td>
+            <td class="num">${s.errors || 0}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : ''}
+      <div class="tl-list">${spans.length ? spans.map((n) => row(n, 0)).join('')
+        : empty('还没有 span', '跑一轮规划/执行之后，这里会出现"轮 → 意图 → LLM/工具"的层级。')}</div>
+    </div>`;
+
+  $('tl-apply').addEventListener('click', () => {
+    S.tlMinMs = Number($('tl-min').value) || 0;
+    drawTab(id, 'timeline');
+  });
+  body.querySelectorAll('.tl-row').forEach((r) => {
+    r.addEventListener('click', () => openDrawerRaw(r.querySelector('.tl-name').textContent.trim(), r.dataset.attrs));
+  });
+}
+
+/* 战役列表（P3-1） */
+async function renderCampaigns() {
+  setPage('战役', '跨任务的覆盖度、进度与重复投入');
+  const data = await api('/api/campaigns');
+  const items = data.items || [];
+  $('view').innerHTML = `
+    <div class="stack">
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">新建战役</h2>
+          <span class="muted">战役是 run 的父容器：用来回答"整体打到哪"</span></div>
+        <div class="card-body">
+          <div class="form-row">
+            <input class="search" id="camp-name" placeholder="战役名（如：客户 A 外网）" />
+            <input class="search" id="camp-goal" placeholder="战役目标（可被证据判定）" style="min-width:320px" />
+            <button class="btn btn-primary" id="camp-create">创建</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">全部战役<small>${items.length}</small></h2></div>
+        ${items.length ? `<table class="table">
+          <thead><tr><th>#</th><th>名称</th><th>状态</th><th class="num">子任务</th><th>目标</th><th></th></tr></thead>
+          <tbody>${items.map((c) => `<tr class="is-clickable" data-camp="${c.id}">
+            <td class="mono">#${c.id}</td>
+            <td><b>${esc(c.name)}</b></td>
+            <td>${campBadge(c.status)}</td>
+            <td class="num">${c.runs ?? 0}</td>
+            <td class="goal-cell"><span>${esc(c.goal)}</span></td>
+            <td><a class="btn btn-sm btn-ghost" href="#/campaigns/${c.id}">打开</a></td>
+          </tr>`).join('')}</tbody></table>` : empty('还没有战役', '在上面建一个，再把子任务挂进来。')}
+      </div>
+    </div>`;
+
+  $('camp-create').addEventListener('click', async () => {
+    const name = $('camp-name').value.trim();
+    const goal = $('camp-goal').value.trim();
+    if (!name || !goal) { toast('战役名与目标都必填'); return; }
+    try {
+      const c = await api('/api/campaigns', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, goal }),
+      });
+      toast(`战役 #${c.id} 已创建`);
+      location.hash = `#/campaigns/${c.id}`;
+    } catch (e) { toast('创建失败：' + e.message); }
+  });
+  document.querySelectorAll('[data-camp]').forEach((tr) => {
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('a')) return;
+      location.hash = `#/campaigns/${tr.dataset.camp}`;
+    });
+  });
+}
+
+/* 战役详情：三个聚合 + 子 run + 范围（P3-1） */
+async function renderCampaign() {
+  const id = S.route.campId;
+  const sum = await api(`/api/campaigns/${id}`);
+  setPage(`战役 #${id}`, sum.goal);
+  const cov = sum.coverage || { total: 0, tested: 0, pct: 0 };
+  const goals = sum.goals || { total: 0, met: 0 };
+  const runs = sum.run_list || [];
+  const dupes = sum.duplicates || [];
+  const scope = sum.scope || [];
+
+  $('view').innerHTML = `
+    <div class="stack">
+      <div class="card">
+        <div class="detail-head">
+          <h2>${esc(sum.name)} ${campBadge(sum.status)}</h2>
+          <div class="detail-meta">
+            <span>目标 <b>${esc(sum.goal)}</b></span>
+            <span>子任务 <b>${runs.length}</b></span>
+            <span>创建 <b>${fmtDate(sum.created_at)}</b></span>
+          </div>
+          <div class="detail-actions">
+            <button class="btn" data-cact="pause">暂停全部</button>
+            <button class="btn" data-cact="resume">恢复全部</button>
+            <button class="btn btn-ghost" data-cact="done">标记完成</button>
+            <button class="btn btn-ghost" data-cact="archive">归档</button>
+            <a class="btn btn-ghost" href="#/campaigns">返回战役</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-kpi">
+        <div class="card kpi">
+          <div class="kpi-label">总覆盖度</div>
+          <div class="kpi-value">${Math.round(cov.pct || 0)}<small>%</small></div>
+          <div class="kpi-sub"><b>${cov.tested}</b> / ${cov.total} 个范围内实体（只认事实锚点）</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">目标进度</div>
+          <div class="kpi-value">${goals.met}<small>/${goals.total}</small></div>
+          <div class="kpi-sub">所有子任务的目标状态聚合</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">重复投入</div>
+          <div class="kpi-value">${dupes.length}<small>个实体</small></div>
+          <div class="kpi-sub">被 ≥2 个子任务测过：该拆分或者该合并的信号</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">范围内实体</div>
+          <div class="kpi-value">${cov.total}</div>
+          <div class="kpi-sub">由战役范围决定（子 run 继承，只许减不许加）</div>
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-head"><h2 class="card-title">子任务<small>${runs.length}</small></h2>
+            <span class="muted">挂一个新任务进来</span></div>
+          <div class="card-body">
+            <div class="form-row" style="margin-bottom:12px">
+              <input class="search" id="att-run" type="number" min="1" placeholder="run id" style="min-width:110px" />
+              <input class="search" id="att-role" placeholder="这一块负责什么（如 外网 / 横向）" />
+              <button class="btn" id="att-btn">挂载</button>
+            </div>
+            ${runs.length ? `<table class="table">
+              <thead><tr><th>#</th><th>负责</th><th>状态</th><th class="num">事实</th><th class="num">发现</th><th class="num">覆盖</th></tr></thead>
+              <tbody>${runs.map((r) => `<tr class="is-clickable" data-gorun="${r.run_id}">
+                <td class="mono">#${r.run_id}</td>
+                <td>${esc(r.role || '—')}</td>
+                <td>${statusBadge(r.status)}</td>
+                <td class="num">${r.facts}</td>
+                <td class="num">${r.findings}</td>
+                <td class="num">${Math.round(r.coverage_pct || 0)}%</td>
+              </tr>`).join('')}</tbody></table>` : empty('还没有子任务', '用上面的输入框把 run id 挂进来。')}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 class="card-title">战役范围<small>${scope.length}</small></h2></div>
+          <div class="card-body">
+            <div class="form-row" style="margin-bottom:12px">
+              <select class="search" id="sc-kind" style="min-width:150px">
+                <option value="root_domain">root_domain（含子域）</option>
+                <option value="subdomain">subdomain（精确）</option>
+                <option value="ip">ip</option>
+                <option value="cidr">cidr</option>
+              </select>
+              <input class="search" id="sc-value" placeholder="example.com / 10.0.0.0/8" />
+              <button class="btn" id="sc-btn">登记</button>
+            </div>
+            ${scope.length ? `<table class="table">
+              <thead><tr><th>类型</th><th>值</th></tr></thead>
+              <tbody>${scope.map((s) => `<tr>
+                <td class="mono">${esc(s.kind)}</td>
+                <td class="mono">${esc(s.domain || s.net || s.value || '')}</td>
+              </tr>`).join('')}</tbody></table>` : empty('还没有战役范围', '没有范围时总覆盖度会一直是 0/0。')}
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">重复投入<small>${dupes.length}</small></h2>
+          <span class="muted">同一实体被多个子任务测过 —— 信息在这里，不阻断执行</span></div>
+        ${dupes.length ? `<table class="table">
+          <thead><tr><th>实体</th><th>类型</th><th>测过它的任务</th></tr></thead>
+          <tbody>${dupes.map((d) => `<tr>
+            <td class="mono">#${d.entity_id} ${esc(d.label || '')}</td>
+            <td>${esc(d.kind)}</td>
+            <td class="mono">${(d.runs || []).map((r) => '#' + r).join(' · ')}</td>
+          </tr>`).join('')}</tbody></table>` : empty('没有重复投入', '每个实体只被一个子任务测过。')}
+      </div>
+    </div>`;
+
+  document.querySelectorAll('[data-cact]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      try {
+        const r = await api(`/api/campaigns/${id}/control`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: b.dataset.cact }),
+        });
+        toast(`战役已${CAMP_LABEL[b.dataset.cact] || b.dataset.cact}${r.affected_runs != null ? '（影响 ' + r.affected_runs + ' 个子任务）' : ''}`);
+        await renderCampaign();
+      } catch (e) { toast('操作失败：' + e.message); }
+    });
+  });
+  $('att-btn').addEventListener('click', async () => {
+    const runID = Number($('att-run').value);
+    if (!runID) { toast('填 run id'); return; }
+    try {
+      await api(`/api/campaigns/${id}/runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_id: runID, role: $('att-role').value.trim() }),
+      });
+      toast(`run #${runID} 已挂到战役 #${id}`);
+      await renderCampaign();
+    } catch (e) { toast('挂载失败：' + e.message); }
+  });
+  $('sc-btn').addEventListener('click', async () => {
+    const kind = $('sc-kind').value;
+    const value = $('sc-value').value.trim();
+    if (!value) { toast('填范围值'); return; }
+    const body = { kind };
+    if (kind === 'cidr') body.net = value; else body.domain = value;
+    try {
+      await api(`/api/campaigns/${id}/scope`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      toast('范围已登记');
+      await renderCampaign();
+    } catch (e) { toast('登记失败：' + e.message); }
+  });
+  document.querySelectorAll('[data-gorun]').forEach((tr) => {
+    tr.addEventListener('click', () => { location.hash = `#/runs/${tr.dataset.gorun}`; });
+  });
+  S.refresh = async () => { if (S.route && S.route.name === 'campaign') await renderCampaign(); };
+}
+
+/* 运维：outbox / 连接器 / 审批策略（P2-3 / P3-3 / P3-4） */
+async function renderOps() {
+  setPage('运维', '事件投递、外部集成与预授权策略');
+  const [ob, conn, pols, grants] = await Promise.all([
+    api('/api/outbox?status=dead&limit=50'),
+    api('/api/connectors/deliveries?limit=50'),
+    api('/api/approval-policies'),
+    api('/api/approval-grants?limit=30'),
+  ]);
+  const dead = ob.items || [];
+  const deliveries = conn.items || [];
+  const enabled = conn.enabled || [];
+  const policies = pols.items || [];
+
+  $('view').innerHTML = `
+    <div class="stack">
+      <div class="grid grid-kpi">
+        <div class="card kpi">
+          <div class="kpi-label">outbox 积压</div>
+          <div class="kpi-value">${ob.pending ?? 0}</div>
+          <div class="kpi-sub">待投递事件（提交了就一定会送）</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">死信</div>
+          <div class="kpi-value">${ob.dead ?? 0}</div>
+          <div class="kpi-sub">停止自动重试，可人工重放</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">已启用连接器</div>
+          <div class="kpi-value">${enabled.length}</div>
+          <div class="kpi-sub">${enabled.length ? enabled.map((x) => esc(x)).join(' · ') : '未配置（QINYUAN_CONNECTOR_*）'}</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">预授权策略</div>
+          <div class="kpi-value">${policies.length}</div>
+          <div class="kpi-sub">每条放行都有审计，可一键撤销</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">死信<small>${dead.length}</small></h2>
+          <span class="muted">修好下游后点"重放"</span></div>
+        ${dead.length ? `<table class="table">
+          <thead><tr><th>#</th><th>topic</th><th class="num">尝试</th><th>最后错误</th><th></th></tr></thead>
+          <tbody>${dead.map((e) => `<tr>
+            <td class="mono">#${e.id}</td>
+            <td class="mono">${esc(e.topic)}</td>
+            <td class="num">${e.attempts}</td>
+            <td class="muted" style="max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.last_error || '')}</td>
+            <td><button class="btn btn-sm" data-replay="${e.id}">重放</button></td>
+          </tr>`).join('')}</tbody></table>` : empty('没有死信', '投递失败超过上限的事件会出现在这里。')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">投递台账<small>${deliveries.length}</small></h2>
+          <span class="muted">幂等键 = connector + event_key；推 5 次只有一个外部对象</span></div>
+        ${deliveries.length ? `<table class="table">
+          <thead><tr><th>连接器</th><th>事件</th><th>外部 id</th><th>状态</th><th>错误</th></tr></thead>
+          <tbody>${deliveries.map((d) => `<tr>
+            <td class="mono">${esc(d.connector)}</td>
+            <td class="mono">${esc(d.event_key)}</td>
+            <td class="mono">${esc(d.external_id || '—')}</td>
+            <td>${esc(d.status || '')}</td>
+            <td class="muted">${esc(d.last_error || '')}</td>
+          </tr>`).join('')}</tbody></table>` : empty('还没有投递记录', '配置连接器后，finding 入库会自动推给外部系统。')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">审批策略<small>${policies.length}</small></h2>
+          <span class="muted">预授权（allow）必须带限速与到期；deny 永远优先</span></div>
+        <div class="card-body">
+          <div class="form-row" style="margin-bottom:12px">
+            <input class="search" id="pol-tool" placeholder="工具名（空=任意）" style="min-width:150px" />
+            <select class="search" id="pol-decision" style="min-width:120px">
+              <option value="allow">allow 预授权</option>
+              <option value="ask">ask 要人工</option>
+              <option value="deny">deny 禁止</option>
+            </select>
+            <select class="search" id="pol-scope" style="min-width:140px">
+              <option value="any">范围：任意</option>
+              <option value="same_target">范围：同目标</option>
+              <option value="in_scope">范围：授权内</option>
+            </select>
+            <input class="search" id="pol-rate" type="number" min="1" placeholder="每小时上限" style="min-width:120px" />
+            <input class="search" id="pol-hours" type="number" min="1" max="8" placeholder="有效小时(<=8)" style="min-width:120px" />
+            <button class="btn btn-primary" id="pol-create">新增</button>
+          </div>
+          ${policies.length ? `<table class="table">
+            <thead><tr><th class="num">优先级</th><th>工具</th><th>范围</th><th>决定</th><th class="num">限速</th><th>到期</th><th></th></tr></thead>
+            <tbody>${policies.map((p) => `<tr>
+              <td class="num">${p.priority}</td>
+              <td class="mono">${esc(p.match_tool || '（任意）')}</td>
+              <td>${esc(p.match_scope)}</td>
+              <td>${p.decision === 'allow' ? '<span class="badge badge-done">放行</span>'
+                : p.decision === 'deny' ? '<span class="badge badge-failed">禁止</span>'
+                : '<span class="badge badge-paused">审批</span>'}</td>
+              <td class="num">${p.max_per_hour || '—'}</td>
+              <td class="muted">${p.expires_at ? fmtDate(p.expires_at) : '—'}</td>
+              <td><button class="btn btn-sm btn-danger" data-unpol="${p.id}">撤销</button></td>
+            </tr>`).join('')}</tbody></table>` : empty('还没有策略', '没有策略时行为与升级前一致（只看规则表）。')}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">放行审计<small>${(grants.items || []).length}</small></h2>
+          <span class="muted">每一条"没问人就放过"的调用都在这里</span></div>
+        ${(grants.items || []).length ? `<table class="table">
+          <thead><tr><th>#</th><th>策略</th><th>任务</th><th>工具</th><th>目标</th><th>时间</th></tr></thead>
+          <tbody>${(grants.items || []).map((g) => `<tr>
+            <td class="mono">#${g.id}</td>
+            <td class="mono">#${g.policy_id}</td>
+            <td class="mono">#${g.run_id}</td>
+            <td class="mono">${esc(g.tool)}</td>
+            <td class="mono">${esc(g.target || '—')}</td>
+            <td class="muted">${fmtDate(g.created_at)}</td>
+          </tr>`).join('')}</tbody></table>` : empty('还没有预授权放行', '预授权生效后，每次放行都会留一条。')}
+      </div>
+    </div>`;
+
+  document.querySelectorAll('[data-replay]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      try {
+        await api(`/api/outbox/${b.dataset.replay}/replay`, { method: 'POST' });
+        toast(`事件 #${b.dataset.replay} 已重放`);
+        await renderOps();
+      } catch (e) { toast('重放失败：' + e.message); }
+    });
+  });
+  $('pol-create').addEventListener('click', async () => {
+    const decision = $('pol-decision').value;
+    const body = {
+      match_tool: $('pol-tool').value.trim(),
+      decision,
+      match_scope: $('pol-scope').value,
+    };
+    const rate = Number($('pol-rate').value) || 0;
+    const hours = Number($('pol-hours').value) || 0;
+    if (decision === 'allow') {
+      if (!rate || !hours) { toast('预授权必须给限速与有效小时（否则等于无限放行）'); return; }
+      body.max_per_hour = rate;
+      body.expires_at = Math.floor(Date.now() / 1000) + hours * 3600;
+    }
+    try {
+      await api('/api/approval-policies', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      toast('策略已新增');
+      await renderOps();
+    } catch (e) { toast('新增失败：' + e.message); }
+  });
+  document.querySelectorAll('[data-unpol]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      if (!window.confirm('撤销后立即失效（正在等待的同类请求仍要人处理）。确认撤销？')) return;
+      try {
+        await api(`/api/approval-policies/${b.dataset.unpol}`, { method: 'DELETE' });
+        toast('策略已撤销');
+        await renderOps();
+      } catch (e) { toast('撤销失败：' + e.message); }
+    });
+  });
+  S.refresh = async () => { if (S.route && S.route.name === 'ops') await renderOps(); };
 }
 
 /* ── 启动 ────────────────────────────────────────────── */

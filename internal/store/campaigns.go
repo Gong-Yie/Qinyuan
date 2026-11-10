@@ -60,28 +60,9 @@ type CampaignDupe struct {
 	FactIDs  []int64 `json:"fact_ids"`
 }
 
-// CampaignDedupHit 是"这个实体在别的子 run 里已经被测过"的一条提示。
-type CampaignDedupHit struct {
-	EntityID   int64  `json:"entity_id"`
-	RunID      int64  `json:"run_id"`
-	FactID     int64  `json:"fact_id"`
-	Summary    string `json:"summary"`
-}
-
-// CampaignView 是注入给 planner 的战役摘要（每轮随态势一起给）。
-type CampaignView struct {
-	ID              int64              `json:"id"`
-	Name            string             `json:"name"`
-	Status          string             `json:"status"`
-	Role            string             `json:"role,omitempty"`
-	Runs            int                `json:"runs"`
-	Total           int                `json:"scope_entities"`
-	Tested          int                `json:"tested_entities"`
-	CoveragePct     float64            `json:"coverage_pct"`
-	Duplicates      int                `json:"duplicate_entities"`
-	TestedElsewhere []CampaignDedupHit `json:"tested_in_other_runs,omitempty"`
-	Note            string             `json:"note,omitempty"`
-}
+// 视图类型已迁到 model（P2-4 S3）：别名保留旧名字，调用点零改动。
+type CampaignDedupHit = model.CampaignDedupHit
+type CampaignView = model.CampaignView
 
 // CampaignSummary 是战役视图的完整聚合。
 type CampaignSummary struct {

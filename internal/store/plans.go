@@ -13,29 +13,10 @@ import (
 	"qinyuan/internal/model"
 )
 
-// PlanGraph 是一个 run 的计划图视图。
-//
+// 计划图的视图类型已迁到 model（P2-4 S3）：别名保留旧名字，调用点零改动。
 // 依据《升级计划》P1-1：计划图不新建表，用 nodes(kind='plan'/'step') + 边表达。
-type PlanGraph struct {
-	PlanID   int64
-	Title    string
-	Strategy string
-	Revision int
-	Steps    []StepView
-}
-
-// StepView 是给模型看的一步。
-type StepView struct {
-	ID          int64   `json:"id"`
-	Text        string  `json:"text"`
-	Expected    string  `json:"expected_evidence"`
-	State       string  `json:"state"`
-	Priority    int     `json:"priority"`
-	DependsOn   []int64 `json:"depends_on"`
-	RealizedBy  int64   `json:"realized_by,omitempty"`
-	SatisfiedBy int64   `json:"satisfied_by,omitempty"`
-	RuleHit     bool    `json:"satisfied_by_rule,omitempty"`
-}
+type PlanGraph = model.PlanGraph
+type StepView = model.StepView
 
 // EnsurePlan 返回当前活跃计划；没有就建一个（每个 run 只允许一个活跃计划）。
 func (s *Store) EnsurePlan(ctx context.Context, runID int64, title, strategy string) (int64, error) {

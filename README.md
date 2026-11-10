@@ -7,7 +7,7 @@
 > M4c 再补上：**流式输出**（SSE，`tool_calls` 按 index 合并）+ **committed 边界**（未提交才可重试，已提交绝不重放）+ TTFT 观测。
 > M5 再补上：**控制台**（`go:embed` 手写 SPA：目标/计划/意图｜活动带｜成本/覆盖/事实）与 **activity SSE**（任务级一条流、`Last-Event-ID` 从 DB 补齐、断线自动重连）。
 > M6 已全部完成。还没有：鉴权、批量复测/CI 集成（P3-3）。
-> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)。
+> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)、[`15-M7-平台化七件套.md`](docs/15-M7-平台化七件套.md)、[`16-M8-控制台与DTO迁移.md`](docs/16-M8-控制台与DTO迁移.md)。
 > **新接手（人或 AI）请先读 [`HANDOFF.md`](HANDOFF.md)**：环境、状态机、已修缺陷、扩展指南都在那里。
 
 ---
@@ -196,6 +196,7 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M6b~~ ✅ | 流量录制（工具层录制 + PG 索引 + 证据快照） | 请求/响应可检索可回放、能绑到 finding |
 | ~~M6c~~ ✅ | finding 复测（重放+断言）+ Markdown 报告 | 三种 finding 分别 verified/failed/unverifiable；报告带可执行 curl |
 | ~~M7~~ ✅ | 平台化七件套：trace 时间线 / outbox / 可插拔 GraphStore / 战役视图 / 审批 SLA / 可复现报告 / 双向集成（`docs/15`） | 时间线能还原"轮→意图→工具"；推 5 次只手 1 个单；报告 zip 自包含 |
+| ~~M8~~ ✅ | 控制台补齐：战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批 + P2-4 S3 DTO 迁移（`docs/16`） | 浏览器实测六页；`graphstore` 不再依赖 `store`；146 用例 + `-race` 全绿 |
 
 ---
 
