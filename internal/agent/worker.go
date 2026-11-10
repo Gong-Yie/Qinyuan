@@ -29,6 +29,8 @@ type Outcome struct {
 	Settlement bool
 	// Compacted 记录执行期间触发过几次上下文压缩（0 = 没触发）。
 	Compacted int
+	// TTFTMs 首次拿到内容的时间（毫秒）；0 = 没测到（非流式 provider）。
+	TTFTMs int64
 }
 
 // Reason 取值：撞上限 ≠ 完成，必须分开。
@@ -165,13 +167,35 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 			}
 		}
 
-		resp, err := provider.Complete(execCtx, &llm.Request{
+		req := &llm.Request{
 			SessionKey: fmt.Sprintf("run%d-intent%d", runID, intentID),
 			System:     system,
 			Messages:   msgs,
 			Tools:      specs,
+		}
+		resp, err := completeTurn(execCtx, provider, req, func(d time.Duration) {
+			if out.TTFTMs != 0 {
+				return
+			}
+			out.TTFTMs = d.Milliseconds()
+			emit(execCtx, &model.Activity{
+				RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+				Summary:  fmt.Sprintf("首字延迟 %dms（流式）", out.TTFTMs),
+				Metadata: map[string]any{"ttft_ms": out.TTFTMs, "turn": turn},
+			})
 		})
 		if err != nil {
+			// 已提交后断流：保留已经拿到的部分结果（不再重放）。
+			if resp != nil && resp.Text != "" {
+				lastText = resp.Text
+			}
+			if errors.Is(err, llm.ErrStreamInterrupted) {
+				emit(context.WithoutCancel(ctx), &model.Activity{
+					RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+					Summary: "流式输出中途断开（已提交，不重放；保留已收到的部分结果）",
+					Detail:  err.Error(),
+				})
+			}
 			if execCtx.Err() != nil {
 				out.Reason = reasonForCtx(ctx, execCtx)
 			} else {
@@ -296,6 +320,7 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 			"reason": out.Reason, "turns": out.Turns,
 			"facts": out.Facts, "findings": out.Findings, "assets": out.Assets,
 			"settlement": out.Settlement, "compacted": out.Compacted,
+			"ttft_ms": out.TTFTMs,
 		},
 	})
 	return out, nil

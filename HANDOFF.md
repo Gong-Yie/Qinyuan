@@ -40,7 +40,7 @@
 | M3.5 | 第 0 轮 goals 拆解（`set_goals`/`set_constraints`/`add_scope`）+ 差分态势（P1-2：`rev` 版本戳 / 增量输入 / `refresh_overview`） | ✅ |
 | M4a | settlement 收尾轮 + compaction/micro-compact + `steer_work` 实时纠偏 | ✅ |
 | M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列（FIFO）+ 完整启动恢复 | ✅ |
-| M4c | 流式输出 + committed 边界 | ❌ 未做 |
+| M4c | 流式输出（SSE）+ committed 边界（未提交才可重试） | ✅ |
 | M5 | activity SSE + Next.js 静态导出 + 链路图 | ❌ 未做 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
 
@@ -152,7 +152,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 02-M3-计划图与覆盖度.md
 │   ├── 03-M3.5-目标拆解与差分态势.md
 │   ├── 04-M4a-撞预算不白跑.md
-│   └── 05-M4b-删除与准入.md
+│   ├── 05-M4b-删除与准入.md
+│   └── 06-M4c-流式与committed.md
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -175,7 +176,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
     │   ├── tasks_lifecycle.go 删除级联 / 队列（Enqueue/NextQueued/CountActive）
     │   └── coverage.go        覆盖度（只认 fact 锚点）
     ├── domain/                归一化（host/URL/eTLD+1/网段）+ 范围闸门
-    ├── llm/                   Provider 接口 + Fake/Dynamic + OpenAI 兼容适配
+    ├── llm/                   Provider 接口 + Fake/Dynamic + OpenAI 兼容（含 SSE 流式 + committed）
     ├── agent/                 prompt、工具面、worker/planner/goals 执行循环、增量态势
     ├── engine/                调度：循环、闸门、收尾、超时、恢复、暂停、删除、准入
     ├── runplan/               用户输入 → 建 run 计划（范围 + 种子实体）
@@ -195,7 +196,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.1k 行、测试 ≈ 3.2k 行、schema ≈ 330 行。62 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。68 个测试。
 
 ---
 
@@ -476,6 +477,17 @@ type Factory interface  { For(sessionKey string) Provider }
 - usage：`prompt_tokens/completion_tokens/prompt_tokens_details.cached_tokens`；
 - 工具参数不是合法 JSON 时，传 `{}` 给工具层，由工具报"参数解析失败"（不 panic）。
 
+### 7.2b 流式（M4c）
+
+- `llm.Streamer` 是**可选能力**：实现它就走 SSE（`stream:true` + `stream_options.include_usage`），
+  不实现就继续整块 `Complete`（假 provider 走这条，行为不变）；
+- 合并规则：`delta.content` 拼接、`delta.tool_calls` 按 `index` 合并、`arguments` 是**分片**要追加
+  （整块覆盖会得到半个 JSON）；`reasoning_content` 进 `Thinking`；
+- **committed 边界**：第一条内容/工具调用片之后不可重放。provider 自己负责——未 committed 才重试；
+  已 committed 断流返回 **部分结果 + `ErrStreamInterrupted`**，worker 保留部分文本并落 `blocked`；
+- 观测：worker 记 **TTFT**（首字延迟）→ 一条 system activity + result 的 `metadata.ttft_ms`；
+- planner / goals 仍用整块调用（回合短，收益低，先不扩散改动面）。
+
 ### 7.3 错误分类（决定"能不能换人/要不要退避"）
 
 | 情况 | 分类 | 行为 |
@@ -585,6 +597,10 @@ type Factory interface  { For(sessionKey string) Provider }
 | engine | `TestDeleteWhileRunning` | 慢任务（5s 调用）能在 8s 内删掉，且 `inflight==0` |
 | engine | `TestAdmissionQueueFIFO` | 上限 1 时 B 排队；A 删掉后 B 被补位 |
 | engine | `TestRecoverStagedRemovals` | `.deleting` 目录按 DB 真相收尾（无→删；有→还原） |
+| llm | `TestOpenAIStreamMergesDeltas` | 正文/thinking 拼接、tool_calls 按 index 合并、arguments 分片拼成合法 JSON、usage |
+| llm | `TestOpenAIStreamInterruptedAfterCommitDoesNotRetry` | 断流 → `ErrStreamInterrupted` + 部分结果；请求数 = 1 |
+| llm | `TestOpenAIStreamRetriesBeforeCommit` / `...QuotaNoRetry` | 未提交可重试；429 余额不重试且不泄凭据 |
+| agent | `TestCompleteTurnUsesStreamerAndReportsTTFT` / `...FallsBackToComplete` | 有流式就走流式并报 TTFT；没有就退回整块 |
 | llm | `TestOpenAICompleteMapsTools` / `ErrorClassification` / `LooksLikeQuota` / `RetriesTransientThenGivesUp` | 请求/响应映射 + 错误分类 + 重试上限 |
 
 ### 10.3 尚未覆盖（要在对应里程碑补）
@@ -632,7 +648,13 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 
 - ~~settlement 收尾轮~~ ✅ / ~~compaction、micro-compact~~ ✅ / ~~`steer_work`~~ ✅（M4a，见 `docs/04`）；
 - ~~删除流水线~~ ✅ / ~~准入队列~~ ✅ / ~~完整启动恢复~~ ✅（M4b，见 `docs/05`）；
-- **非流式 → 流式**（以及 committed 边界）：**只剩这一项**（M4c）。
+- ~~**流式 + committed 边界**~~ ✅（M4c，见 `docs/06`）。**M4 全部完成。**
+
+### M4c 的已知限制
+
+- 增量 activity 行没拆（一轮仍只写一条合并后的 text/thinking；M5 做逐字 SSE 时再拆）；
+- 只有 `chat/completions` 一种 wire 的流式（anthropic / responses 未做）；
+- 按角色的 profile 切换（P1-4）没做，所以"已提交后不能换人"目前只是 provider 内部不重试。
 
 ### M4b 的已知限制
 
@@ -724,12 +746,16 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 24. **准入计数只认 `status='running'`**：把 `created` 也算进"占坑"，同时建的任务会互相挤进队列（全部排队、谁都不跑）。
 25. **删除要先 rename 文件再删库**：反过来一旦 DB 失败就永久丢数据；DB 成功而文件清理失败**不能回退**状态。
 26. **`stop` 就是删除**：钦原没有"停机保号"状态；想保留数据必须用 `pause`（API 文案已写清）。
+27. **流式的 `arguments` 是分片**：整块覆盖会拼出半个 JSON，工具层只会报"参数解析失败"。
+28. **committed 之后绝不重试**：这是流式唯一的正确性约束；provider 自己负责，别在上层再"补一次"。
+29. **`stream_options.include_usage` 必须显式要**：否则流式响应的 token 账全是 0。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+5c33ad1 M4b: 删除流水线（屏障→排水→两阶段）+ 并发准入队列（FIFO）+ 完整启动恢复
 4c1be78 M4a: settlement 收尾轮 + compaction/micro-compact + steer_work 实时纠偏
 1ea3168 M3.5: 第 0 轮目标拆解（set_goals/set_constraints/add_scope）+ 差分态势（rev 版本戳/增量输入/refresh_overview）
 d73d6f4 文档：新增 HANDOFF.md（环境/状态机/已修缺陷/扩展指南），README 加入口
@@ -741,15 +767,14 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-**M4b 的改动还在工作区，未提交**（同上：先 review 再提交）。
-改动清单：`docs/05` + `internal/engine/{lifecycle.go,engine.go}` + `internal/store/tasks_lifecycle.go`
-+ `internal/server`（DELETE / stop）+ `internal/config` + `cmd/qinyuan/main.go` + 相应测试。
-`docs/00–05` 是设计与验收记录；本文是状态快照。
+**M4c 的改动还在工作区，未提交**（同上：先 review 再提交）。
+改动清单：`docs/06` + `internal/llm/{stream,openai_stream}.go` + `internal/agent/{stream.go,worker.go}` + 相应测试。
+`docs/00–06` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 62 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 68 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 ```
