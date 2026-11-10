@@ -48,12 +48,16 @@ func Build(in Request) (store.CreateRunInput, error) {
 		return out, nil
 	}
 
-	// URL
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+	// URL（scheme 大小写不敏感：HTTP:// 也是 URL，不能当裸主机名处理）
+	lowerTarget := strings.ToLower(target)
+	if strings.HasPrefix(lowerTarget, "http://") || strings.HasPrefix(lowerTarget, "https://") {
 		norm, err := domain.NormalizeURL(target)
 		if err != nil {
 			return out, err
 		}
+		// 入口 URL 必须留下来：范围只回答"允许打哪"，不回答"从哪开始"。
+		// 丢掉端口时 worker 会去猜 80/443/3000…（真实 run 里 49% 的请求打错端口）。
+		out.Seeds = append(out.Seeds, norm)
 		u, _ := url.Parse(norm)
 		host := domain.NormalizeHost(u.Hostname())
 		// 主机名是 IP 字面量时必须按 ip 登记：subdomain 规则不参与 IP 匹配。

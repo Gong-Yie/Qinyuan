@@ -16,15 +16,19 @@ func NewAddPlanStepTool() *Tool {
 	return &Tool{
 		Name: "add_plan_step",
 		Description: `往计划图里加一个可执行步骤（带依赖与期望证据）。
-expected_evidence 必须是一句【可被事实摘要匹配】的判据（例："拿到数据库连接串"），
-不要写"完成注入"这种无法判定的说法。
+expected_evidence 必须是【可检索的判据词条】：用 ；或 、 分隔，每条是一个会出现在事实原文里的
+关键名词/短语（例："Server 头含 nginx；X-Powered-By；版本号 v1.4.2"）。
+每条要有区分度：具体的产品名/头名/字段名/具体字符串；别写"登录""表单""302"这种单位词，
+否则任意一条沾边的事实都会满足该步。
+不要写"拿到…""确认…""完成注入"这类整句任务口吻，也不要用"完成注入"这种无法判定的说法 ——
+代码是按片段匹配的，整句匹配不上就永远不会自动完成。
 depends_on 填前置步骤 id（可空）；有依赖的步骤在依赖完成前是 todo，不会出现在 ready_steps 里。
 步骤的 ready/done 由代码判定：事实命中 expected_evidence 会自动完成该步，你也可以用 mark_step_done 显式判定。`,
 		Schema: toolSpecJSON(`{
   "type": "object",
   "properties": {
     "text": {"type": "string", "description": "这一步要做什么"},
-    "expected_evidence": {"type": "string", "description": "可被事实摘要匹配的判据"},
+  "expected_evidence": {"type": "string", "description": "可检索的判据词条，用；或、分隔（例：Server 头含 nginx；X-Powered-By）"},
     "depends_on": {"type": "array", "items": {"type": "integer"}},
     "priority": {"type": "integer", "minimum": 0, "maximum": 10}
   },

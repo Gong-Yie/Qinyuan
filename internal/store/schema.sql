@@ -353,5 +353,10 @@ ALTER TABLE run_tasks ADD COLUMN IF NOT EXISTS goals_at BIGINT NOT NULL DEFAULT 
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE edges ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0;
 
+-- seeds：用户在 --target 里给的入口 URL（可能带端口/路径）。
+-- 只把 target 降成"范围"会丢掉端口，worker 就只能猜端口 —— 真实 run 里 49% 的 HTTP
+-- 请求打在 80/443/3000/8000… 上。范围回答"允许打哪"，seeds 回答"从哪开始"。
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS seeds TEXT[] NOT NULL DEFAULT '{}';
+
 CREATE INDEX IF NOT EXISTS idx_nodes_rev ON nodes(run_id, rev);
 CREATE INDEX IF NOT EXISTS idx_edges_rev ON edges(run_id, rev);

@@ -90,12 +90,15 @@ type Run struct {
 	ID          int64
 	Goal        string
 	Description string
-	Status      string
-	RoundNo     int64
-	Version     int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	Task        *Task
+	// Seeds 用户给的入口 URL（可能有端口/路径）。与范围不是一回事：
+	// 范围回答"允许打哪"，seeds 回答"从哪开始"。
+	Seeds     []string
+	Status    string
+	RoundNo   int64
+	Version   int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Task      *Task
 }
 
 // Task run 的业务状态（run_tasks 表）。

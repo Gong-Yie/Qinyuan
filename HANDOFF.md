@@ -196,7 +196,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。68 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。86 个测试。
 
 ---
 
@@ -540,7 +540,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（51 个，`*_test.go`）
+## 10. 测试（86 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -626,6 +626,10 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 | 9 | 超时协调器自锁 | `settleTask → StopTask → wg.Wait()`，而 deadlineLoop 自己在 wg 里 | deadlineLoop 不进 `rt.wg` |
 | 10 | 步骤状态按"最新在前"返回，测试/渲染读反 | `NodesByKind` 是 id DESC | `PlanGraph` 单独按 id ASC 查 |
 | 11 | `scripts/race.ps1` 把 `./...` 拆成 `.`、`/`、`.`… 然后报 "no Go files" | `$targets = if (...) { $args } else { @('./...') }`：PowerShell 的 if 表达式把**单元素数组解包成字符串**，随后 `@targets` 按字符展开 | 改成先赋数组再在分支里替换（见脚本注释）；`-race` 已重新全绿 |
+| 12 | worker 不知道端口，49% 的 HTTP 请求打在 80/443/3000… | `runplan` 把 target 降成"范围"时把 scheme/port/path 全丢了，库里没有任何一处记着入口 URL | 新增 `runs.seeds` + 两个 prompt 各渲染一行"起点 URL"；详见 `docs/07` |
+| 13 | 任务 `done` 后计划步骤永远停在 `running` | `LinkStepIntent` 只有 `ready/todo→running`，出口只有"规则命中"和"显式 mark"，意图结束没人回收 | `CASIntent` 落终态时同事务回收（`store/step_reconcile.go`）；`paused` 不回收 |
+| 14 | 10 个真实步骤、0 次规则自动完成 | `expected_evidence` 是任务口吻整句，2-gram 覆盖率被动词稀释到 20~40%，且 2-gram 跨词边界 | `expectedMatches` 改成"子句 + 3/4 字片段"（4 字 1 个 或 3 字 2 个），prompt 要求写判据词条；详见 `docs/08` |
+| 15 | `/login` 缺 `X-Powered-By` 被断言成"nginx 静态文件"，却仍标 `observed` | 两档语义没定义边界，模型把"由缺失推出的结论"当成直接观察 | prompt + `record_fact` 描述钉死：缺失/差异/时序/排除法推出的一律 `inferred` 并写推理链；详见 `docs/08` |
 
 > 共性：**上下文生命周期**（1/3/6）与**状态机竞态**（2/7/8/9）。只看代码看不出来，必须让测试真的跑起来。
 
@@ -749,12 +753,24 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 27. **流式的 `arguments` 是分片**：整块覆盖会拼出半个 JSON，工具层只会报"参数解析失败"。
 28. **committed 之后绝不重试**：这是流式唯一的正确性约束；provider 自己负责，别在上层再"补一次"。
 29. **`stream_options.include_usage` 必须显式要**：否则流式响应的 token 账全是 0。
+30. **"范围"和"入口"是两件事**：范围回答"允许打哪"，`seeds` 回答"从哪开始"。只存范围，
+    worker 就会去猜端口（实测 49% 的请求打错端口）。新加的目标类型也要想清楚这两个问题。
+31. **任何"由 A 迁移到 B"的状态都必须有回程**：步骤进 `running` 靠 `LinkStepIntent`，
+    出去必须有人在意图终态时回收，否则计划图会永远显示"在跑"。
+32. **规则匹配别对"整句任务口吻"做全串匹配**：动词与虚词会稀释覆盖率；要切子句、去包装词、
+    只匹配具体名词片段。但片段匹配**偏松** —— 同一个事实可能同时满足多个步骤，所以判据词条
+    必须要求"有区分度"，别写「登录」「表单」这种单位词。
+33. **`observed` 只允许表示"直接看到"**：靠缺失、差异、时序、排除法推出来的结论一律 `inferred`。
+    证据门槛挡不住"证据不支持结论"，这一层只能靠 prompt 语义约束。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+<待提交> 修复：种子 URL（runs.seeds）+ 意图终态回收步骤 + 判据匹配重写 + confidence 边界（docs/07、08）
+29e5f25 演示：M4 现场效果（假 OpenAI 流式网关 + 收尾轮/队列/删除/流式 TTFT）
+be7a1b5 M4c: 流式输出（SSE）+ committed 边界（未提交才可重试）+ TTFT 观测
 5c33ad1 M4b: 删除流水线（屏障→排水→两阶段）+ 并发准入队列（FIFO）+ 完整启动恢复
 4c1be78 M4a: settlement 收尾轮 + compaction/micro-compact + steer_work 实时纠偏
 1ea3168 M3.5: 第 0 轮目标拆解（set_goals/set_constraints/add_scope）+ 差分态势（rev 版本戳/增量输入/refresh_overview）
@@ -767,14 +783,20 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-**M4c 的改动还在工作区，未提交**（同上：先 review 再提交）。
-改动清单：`docs/06` + `internal/llm/{stream,openai_stream}.go` + `internal/agent/{stream.go,worker.go}` + 相应测试。
-`docs/00–06` 是设计与验收记录；本文是状态快照。
+**当前工作区未提交的是两轮修复**（先 review 再提交）：
+
+- P0/P1（`docs/07`）：`internal/store/{schema.sql,runs.go,graph.go,step_reconcile.go}` +
+  `internal/runplan/runplan.go` + `internal/model/model.go` + `internal/agent/prompt.go`；
+- P2/P3（`docs/08`）：`internal/store/plans.go`（`expectedMatches` 重写）+ `internal/agent/{prompt.go,tool_plan.go,tool_write.go}`；
+- 两者共新增 6 个测试文件（runplan / store×3 / agent×2）。
+
+M4c 已提交（`be7a1b5`），工作区干净状态见 `git status`。
+`docs/00–08` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 68 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 86 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

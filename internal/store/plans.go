@@ -436,7 +436,19 @@ func (s *Store) LinkStepIntent(ctx context.Context, runID, stepID, intentID int6
 
 // expectedMatches 判断一条事实文本是否满足期望证据。
 //
-// 规则（刻意简单、可解释）：整体包含 → 命中；否则按 token（中文 2-gram）覆盖率 ≥60% 命中。
+// 规则（纯代码、可解释；用 3 次真实 run 的 15 对 (step, fact) 校准，见 docs/08）：
+//
+//  1. 归一化后整串包含 → 命中（最快也最安全）；
+//  2. 否则把 expected 按 、，,；;/ 或 切成子句，并从子句里取"可检索签名"：
+//     中文取同段内的 3/4 字片段（**不跨词边界**，否则会切出 "页u"、"r响" 这种垃圾），
+//     ASCII 取 ≥4 字的整词（server / nginx / favicon）；
+//  3. 命中条件：任意一个 4 字签名出现，或 ≥2 个不同的 3 字签名出现。
+//
+// 为什么不再用"整串 2-gram 覆盖率 ≥60%"：expected_evidence 天然是任务口吻
+// （"拿到 Server 响应头或框架版本标识等服务指纹"），动词与虚词把覆盖率稀释到 20~40%，
+// 规则几乎永远命中不了 —— 实测 10 个真实步骤、0 次自动完成，全靠 planner 手工 mark。
+// 代价是规则更"松"：它只能证明"事实里出现了这条判据的关键片段"，不能证明语义成立，
+// 所以事实本身的可信度仍然由 confidence（observed/inferred）与 evidence 决定。
 func expectedMatches(text, expected string) bool {
 	exp := normalizeForMatch(expected)
 	txt := normalizeForMatch(text)
@@ -446,20 +458,26 @@ func expectedMatches(text, expected string) bool {
 	if strings.Contains(txt, exp) {
 		return true
 	}
-	tokens := matchTokens(exp)
-	if len(tokens) == 0 {
-		return false
-	}
-	hit := 0
-	for _, tok := range tokens {
-		if strings.Contains(txt, tok) {
-			hit++
+	for _, sig := range evidenceSignatures(expected, 4) {
+		if strings.Contains(txt, sig) {
+			return true
 		}
 	}
-	if len(tokens) == 1 {
-		return hit == 1
+	hit := 0
+	seen := map[string]bool{}
+	for _, sig := range evidenceSignatures(expected, 3) {
+		if seen[sig] {
+			continue
+		}
+		seen[sig] = true
+		if strings.Contains(txt, sig) {
+			hit++
+			if hit >= 2 {
+				return true
+			}
+		}
 	}
-	return float64(hit)/float64(len(tokens)) >= 0.6
+	return false
 }
 
 func normalizeForMatch(s string) string {
@@ -472,39 +490,73 @@ func normalizeForMatch(s string) string {
 	return b.String()
 }
 
-func matchTokens(s string) []string {
-	runes := []rune(s)
-	if len(runes) <= 2 {
-		return []string{s}
-	}
-	// 中文用 2-gram（整句包含对措辞太敏感）；英文/数字按整词。
+// evidenceStopwords 是"任务口吻"带进来、但不承载判据内容的包装词。
+// 只整词删除，避免把 "服务器" 里的 "服务" 删掉。
+var evidenceStopwords = []string{
+	"拿到", "获取", "得到", "取得", "找到", "定位到", "确认", "核实", "记录", "输出", "整理",
+	"及其", "以及", "相关", "具体", "完整", "原始", "证据", "可访问性", "可重放", "可复核", "特征",
+}
+
+// evidenceClauses 按 、，,；;/ 以及"或/或者"把期望证据切成子句。
+func evidenceClauses(expected string) []string {
+	repl := strings.NewReplacer(
+		"、", "\x00", "，", "\x00", ",", "\x00", "；", "\x00", ";", "\x00",
+		"/", "\x00", "或者", "\x00", "或", "\x00",
+	)
 	var out []string
-	if containsCJK(s) {
-		seen := map[string]bool{}
-		for i := 0; i+1 < len(runes); i++ {
-			t := string(runes[i : i+2])
-			if !seen[t] {
-				seen[t] = true
-				out = append(out, t)
-			}
+	for _, p := range strings.Split(repl.Replace(expected), "\x00") {
+		p = strings.Trim(strings.TrimSpace(p), "（）()[]【】 ")
+		if p != "" {
+			out = append(out, p)
 		}
-		return out
 	}
-	for _, f := range strings.FieldsFunc(s, func(r rune) bool {
-		return !(unicode.IsLetter(r) || unicode.IsDigit(r))
-	}) {
-		if len(f) >= 2 {
-			out = append(out, f)
-		}
+	if len(out) == 0 {
+		return []string{expected}
 	}
 	return out
 }
 
-func containsCJK(s string) bool {
-	for _, r := range s {
-		if unicode.Is(unicode.Han, r) {
-			return true
+// evidenceSignatures 从 expected 里抽出可检索片段：
+// 中文按同一 CJK 段取 n-gram，ASCII 取 ≥4 字的整词。
+func evidenceSignatures(expected string, n int) []string {
+	var out []string
+	for _, clause := range evidenceClauses(expected) {
+		for _, w := range evidenceStopwords {
+			clause = strings.ReplaceAll(clause, w, " ")
 		}
+		s := normalizeForMatch(clause)
+
+		var cjk []rune
+		var ascii strings.Builder
+		flushCJK := func() {
+			if len(cjk) >= n {
+				for i := 0; i+n <= len(cjk); i++ {
+					out = append(out, string(cjk[i:i+n]))
+				}
+			}
+			cjk = cjk[:0]
+		}
+		flushASCII := func() {
+			if w := ascii.String(); len(w) >= 4 {
+				out = append(out, w)
+			}
+			ascii.Reset()
+		}
+		for _, r := range s {
+			switch {
+			case unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r):
+				flushASCII()
+				cjk = append(cjk, r)
+			case unicode.IsLetter(r) || unicode.IsDigit(r):
+				flushCJK()
+				ascii.WriteRune(r)
+			default:
+				flushCJK()
+				flushASCII()
+			}
+		}
+		flushCJK()
+		flushASCII()
 	}
-	return false
+	return out
 }

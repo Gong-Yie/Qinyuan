@@ -20,6 +20,8 @@ type CreateRunInput struct {
 	TimeoutSeconds int
 	WorkerCount    int
 	Scopes         []model.Scope
+	// Seeds 入口 URL（openai 归一化后传）。只存范围会丢端口，worker 就只能猜。
+	Seeds []string
 	// SeedEntities 由调用方归一化后再传（store 不做领域归一化）。
 	SeedEntities []EntityInput
 }
@@ -34,6 +36,10 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 	if in.WorkerCount <= 0 {
 		in.WorkerCount = 2
 	}
+	seeds := in.Seeds
+	if seeds == nil {
+		seeds = []string{}
+	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -43,8 +49,8 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 
 	var runID int64
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO runs (goal, description) VALUES ($1, $2) RETURNING id`,
-		in.Goal, nullIfEmpty(in.Description)).Scan(&runID); err != nil {
+		`INSERT INTO runs (goal, description, seeds) VALUES ($1, $2, $3) RETURNING id`,
+		in.Goal, nullIfEmpty(in.Description), seeds).Scan(&runID); err != nil {
 		return nil, fmt.Errorf("建 run 失败：%w", err)
 	}
 	if _, err := tx.Exec(ctx,
@@ -131,7 +137,7 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 // Run 读一个 run（含任务行）。
 func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at,
+		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at, r.seeds,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
 		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
 		       t.goals_at
@@ -143,7 +149,7 @@ func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 	var desc *string
 	var name *string
 	var runID *int64
-	err := row.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt,
+	err := row.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Seeds,
 		&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
 		&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
 		&t.GoalsAt)
@@ -172,7 +178,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 		limit = 50
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at,
+		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at, r.seeds,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
 		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
 		       t.goals_at
@@ -189,7 +195,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 		var t model.Task
 		var desc, name *string
 		var runID *int64
-		if err := rows.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt,
+		if err := rows.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Seeds,
 			&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
 			&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
 			&t.GoalsAt); err != nil {

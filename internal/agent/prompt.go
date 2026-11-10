@@ -47,6 +47,9 @@ func BuildWorkerSystem(in WorkerPromptInput) string {
   · 多个观察汇总成【一条】事实（summary 一句总结 + detail 写细节），不要一个属性一条；
   · 只写增量：只记这次【新得到】的，别把已有事实换措辞重记；
   · 只写真实看到的：给 evidence（一行：命令 + 最能证明的一两行输出），标 confidence。
+  · confidence 只有两档，别混：observed = 本次【直接看到】的字节/状态码/响应头/命令输出；
+    凡是由「缺失、差异、时序、排除法」推出来的（"没有 X-Powered-By 所以是静态文件"、
+    "版本落在受影响范围所以可能有洞"）一律 inferred，并在 detail 里写清推理链。
 - 确认漏洞 → report_finding（传 intent_id）：
   只有本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用；
   严禁把"版本/指纹匹配到 CVE""参数看起来可注入""从更新日志推断"当已确认；
@@ -85,6 +88,10 @@ func BuildWorkerSystem(in WorkerPromptInput) string {
 	if in.Scopes != "" {
 		b.WriteString("本任务授权范围：" + in.Scopes + "\n")
 	}
+	if in.Run != nil && len(in.Run.Seeds) > 0 {
+		b.WriteString("起点 URL（用户给的入口，从这里开始；端口/协议以它为准，不要猜）：" +
+			strings.Join(in.Run.Seeds, "、") + "\n")
+	}
 
 	// 中间产物规约：代码所有。
 	b.WriteString("\n【中间产物输出规约】脚本、payload、抓到的响应体等一切中间产物，一律写到本任务工作目录 ")
@@ -111,6 +118,10 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
 	b.WriteString("\n任务目标：" + run.Goal + "\n")
 	if scopes != "" {
 		b.WriteString("授权范围：" + scopes + "\n")
+	}
+	if len(run.Seeds) > 0 {
+		b.WriteString("起点 URL（用户给的入口，写意图时直接用它，别让执行者猜端口）：" +
+			strings.Join(run.Seeds, "、") + "\n")
 	}
 	if final {
 		b.WriteString("\n【收尾轮】任务时间到：不再派新意图。你只做两件事：\n" +
@@ -154,6 +165,12 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
    - 本任务还没有计划图、而目标又不是一句话能做完的 → 先用 add_plan_step 把战役拆成 3~8 步
      （每步都要给 expected_evidence 与 depends_on），再只对本轮 ready_steps 里的步骤派意图；
      不要一次把整条链并行铺开。
+   - **expected_evidence 写成"可检索的判据词条"**：用 ；或 、 分隔，每条是一个会出现在事实原文里的
+     关键名词/短语（例：「Server 头含 nginx；X-Powered-By；版本号 v1.4.2」）。
+     每条要有区分度：写具体的产品名/头名/字段名/具体字符串，别写「登录」「表单」「302」
+     这种单位词 —— 太泛的词会让任意一条沾边的事实都满足该步，等于提前盖章。
+     不要写「拿到…」「确认…」「完成…」这类任务口吻的整句 —— 代码按片段匹配，整句会匹配不上，
+     步骤就只能靠你手工 mark，计划图的自动推进就失效了。
    - 已有计划图 → 本轮优先从 ready_steps 里选；每个 add_intent 必须带 step_id；
      确实要计划外探索时用 off_plan=true，并在 summary 里说明为什么计划需要修订。
    - 事实命中某步的 expected_evidence 时该步会自动完成、下一步变 ready；规则没命中再用 mark_step_done。

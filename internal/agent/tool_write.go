@@ -321,7 +321,9 @@ func NewRecordFactTool() *Tool {
 		Description: `把本次探索得到的【结论】写进探索图。
 规则（很重要）：① 多个观察汇总成一条（summary 一句话总结 + detail 写细节），不要一个属性一条；
 ② 只写增量，别把已有事实换措辞重记；③ 必须给 evidence（一行：命令 + 最能证明的一两行输出）；
-④ confidence：observed=直接看到，inferred=据现象推断；⑤ 否定结论也要写（"端口关闭""无回显"），
+④ confidence 两档，别混：observed=本次【直接看到】的字节/状态码/响应头/命令输出；
+inferred=由「缺失、差异、时序、排除法」推出的结论（"没有 X 头所以是静态文件"、"版本在受影响范围
+所以可能有洞"），且 detail 里要写清推理链；⑤ 否定结论也要写（"端口关闭""无回显"），
 但只写"观察 + 试探性读法"，方向是否放弃由规划者定 —— 你只负责如实汇报。`,
 		Schema: toolSpecJSON(`{
   "type": "object",

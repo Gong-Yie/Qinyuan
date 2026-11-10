@@ -242,11 +242,22 @@ func (s *Store) CASIntent(ctx context.Context, runID, intentID int64, expected, 
 	if tag.RowsAffected() != 1 {
 		return false, nil
 	}
+	// 意图落终态时，挂它的计划步骤要跟着松手：否则计划图会永远显示 "running"
+	// （真实 run 里抓到过：意图 done，步骤卡 running，看起来还有活在跑）。
+	var stepIDs []int64
+	if isTerminalIntentState(next) {
+		var rerr error
+		stepIDs, rerr = reconcileStepsAfterIntent(ctx, tx, runID, intentID)
+		if rerr != nil {
+			return false, rerr
+		}
+	}
 	rev, err := bumpVersion(ctx, tx, runID)
 	if err != nil {
 		return false, err
 	}
-	if err := stampNodes(ctx, tx, runID, rev, intentID); err != nil {
+	nodes := append([]int64{intentID}, stepIDs...)
+	if err := stampNodes(ctx, tx, runID, rev, nodes...); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
