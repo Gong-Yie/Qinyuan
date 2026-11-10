@@ -35,6 +35,18 @@ type PlanBrief struct {
 	Ready      []Brief `json:"ready_steps"`
 }
 
+// AttachmentBrief 是附件在态势里的一行（M12）。
+//
+// 只给"名字/类型/大小/前 200 字摘要"：模型先知道有什么，再决定用 read_attachment 打开哪个。
+// 正文不塞进每轮 prompt —— 附件可能很大，而且大多数轮次根本用不到。
+type AttachmentBrief struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Size    int64  `json:"size"`
+	Summary string `json:"summary,omitempty"`
+}
+
 // Overview 是 planner 每轮预取、worker 开局看一眼的态势。
 //
 // 三条渲染规则（01-数据模型 §10.5）：
@@ -63,6 +75,9 @@ type Overview struct {
 	Coverage      *store.Coverage `json:"coverage,omitempty"`
 	// Campaign 只在这个 run 属于某个战役时出现（零注入：独立任务看不到它）。
 	Campaign    *store.CampaignView `json:"campaign,omitempty"`
+	// Attachments 是任务附件清单；正文用 read_attachment 取。
+	Attachments      []AttachmentBrief `json:"attachments,omitempty"`
+	AttachmentsTotal int               `json:"attachments_total,omitempty"`
 	GeneratedAt   int64           `json:"generated_at"`
 }
 
@@ -156,6 +171,20 @@ func BuildOverview(ctx context.Context, g graphstore.Graph, runID int64, withCov
 		return nil, err
 	}
 	ov.Entities = len(ents)
+
+	// 附件清单（M12）：先给"有什么"，正文由 read_attachment 按需取。
+	if atts, aerr := g.Attachments(ctx, runID); aerr == nil && len(atts) > 0 {
+		ov.AttachmentsTotal = len(atts)
+		for i, a := range atts {
+			if i >= 20 {
+				break
+			}
+			ov.Attachments = append(ov.Attachments, AttachmentBrief{
+				ID: a.ID, Name: a.Name, Kind: a.Kind, Size: a.Size,
+				Summary: model.TrimSummary(a.Summary, 200),
+			})
+		}
+	}
 
 	// 计划图摘要：只给标题、计数与 ready 步骤 —— planner 的"本轮只能从 ready 里选"靠它。
 	if pg, err := g.PlanGraph(ctx, runID); err == nil && pg.PlanID > 0 {

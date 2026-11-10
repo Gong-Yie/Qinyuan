@@ -22,6 +22,7 @@ type Store struct {
 	nodes    map[int64][]*model.Node
 	edges    map[int64][]model.Edge
 	entities map[int64][]*model.Entity
+	atts     map[int64][]*model.Attachment
 	plan     map[int64]*model.PlanGraph
 	coverage map[int64]*model.Coverage
 	campaign map[int64]*model.CampaignView
@@ -35,6 +36,7 @@ func New() *Store {
 		runs: map[int64]*model.Run{}, scopes: map[int64][]model.Scope{},
 		nodes: map[int64][]*model.Node{}, edges: map[int64][]model.Edge{},
 		entities: map[int64][]*model.Entity{}, plan: map[int64]*model.PlanGraph{},
+		atts:     map[int64][]*model.Attachment{},
 		coverage: map[int64]*model.Coverage{}, campaign: map[int64]*model.CampaignView{},
 		nextID: 100,
 	}
@@ -72,6 +74,23 @@ func (s *Store) AddEntity(runID int64, e *model.Entity) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entities[runID] = append(s.entities[runID], e)
+}
+
+// AddAttachment 预置一个附件。
+func (s *Store) AddAttachment(runID int64, a *model.Attachment) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	a.ID = s.nextID
+	a.RunID = runID
+	s.atts[runID] = append(s.atts[runID], a)
+}
+
+// Attachments 列附件。
+func (s *Store) Attachments(_ context.Context, runID int64) ([]*model.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*model.Attachment(nil), s.atts[runID]...), nil
 }
 
 // SetPlan 预置计划图。

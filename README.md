@@ -9,7 +9,7 @@
 > M6 已全部完成；M7–M9 补上平台化能力（trace/outbox/战役/报告/连接器）、控制台新页面与**鉴权**。
 > 还没有：多用户/SSO、批量复测的任务化计划（CI 已能单条回写）。
 > 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)、[`15-M7-平台化七件套.md`](docs/15-M7-平台化七件套.md)、[`16-M8-控制台与DTO迁移.md`](docs/16-M8-控制台与DTO迁移.md)。
-> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)、[`15-M7-平台化七件套.md`](docs/15-M7-平台化七件套.md)、[`16-M8-控制台与DTO迁移.md`](docs/16-M8-控制台与DTO迁移.md)、[`17-M9-鉴权.md`](docs/17-M9-鉴权.md)。
+> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)、[`15-M7-平台化七件套.md`](docs/15-M7-平台化七件套.md)、[`16-M8-控制台与DTO迁移.md`](docs/16-M8-控制台与DTO迁移.md)、[`17-M9-鉴权.md`](docs/17-M9-鉴权.md)、[`18-M12-附件.md`](docs/18-M12-附件.md)。
 > **新接手（人或 AI）请先读 [`HANDOFF.md`](HANDOFF.md)**：环境、状态机、已修缺陷、扩展指南都在那里。
 
 ---
@@ -153,6 +153,8 @@ pwsh -File scripts/demo/demo-m4.ps1
 | GET | `/api/runs/{id}/report?format=md\|html\|zip\|json` | 可复现报告（默认脱敏，`full=1` 需授权） |
 | GET | `/api/connectors/deliveries` | 外部集成投递台账 |
 | POST | `/api/runs/{id}/sync-tickets` · `/ci-export` · `/ci-result` | 工单回写 / CI 导出 / 回归回写 |
+| POST/GET | `/api/runs/{id}/attachments` | 任务附件：上传（multipart，字段 `file`）/ 列表 |
+| GET/DELETE | `/api/runs/{id}/attachments/{aid}` | 下载 / 删除附件 |
 
 错误统一 `{"error": "中文可读原因"}`。所有时间戳为 unix 秒。
 
@@ -213,6 +215,7 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M7~~ ✅ | 平台化七件套：trace 时间线 / outbox / 可插拔 GraphStore / 战役视图 / 审批 SLA / 可复现报告 / 双向集成（`docs/15`） | 时间线能还原"轮→意图→工具"；推 5 次只手 1 个单；报告 zip 自包含 |
 | ~~M8~~ ✅ | 控制台补齐：战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批 + P2-4 S3 DTO 迁移（`docs/16`） | 浏览器实测六页；`graphstore` 不再依赖 `store`；146 用例 + `-race` 全绿 |
 | ~~M9~~ ✅ | 鉴权：Bearer 令牌（viewer/operator/admin）+ 会话 Cookie + CSRF + 登录限速 + 非回环必须有鉴权（`docs/17`） | 无凭据 401；viewer 写 403；CSRF 缺失 403；`0.0.0.0` 无令牌拒绝启动；156 用例全绿 |
+| ~~M12~~ ✅ | 任务附件：上传（内容寻址）+ 清单注入 + 只读工具 `list_attachments`/`read_attachment`（`docs/18`） | 附件进态势；agent 只读、无路径参数；逃逸路径被拒 |
 
 ---
 

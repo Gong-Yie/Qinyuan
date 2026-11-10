@@ -40,6 +40,8 @@ type Config struct {
 	MaxToolOutput   int           // 单次工具输出上限（字符），超过落盘
 	DefaultMaxTurns int           // worker 每次执行的回合上限
 	DefaultTimeout  time.Duration // worker 每次执行的时长上限
+	// MaxUploadMB 是单个附件上限（M12）。
+	MaxUploadMB int
 
 	// M3.5：调度与上下文成本的可调项（都有安全默认值，不改也能跑）。
 	GoalsMaxTurns    int // 第 0 轮目标拆解的回合上限
@@ -194,6 +196,7 @@ func Load() (*Config, error) {
 		MaxToolOutput:     30000,
 		DefaultMaxTurns:   12,
 		DefaultTimeout:    10 * time.Minute,
+		MaxUploadMB:       32,
 		GoalsMaxTurns:     8,
 		PlannerFullEvery:  20,
 		DeltaLimit:        200,
@@ -245,6 +248,13 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_MAX_TURNS 非法：%q", v)
 		}
 		c.DefaultMaxTurns = n
+	}
+	if v, _ := pick("QINYUAN_MAX_UPLOAD_MB", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 512 {
+			return nil, fmt.Errorf("QINYUAN_MAX_UPLOAD_MB 非法：%q（1..512）", v)
+		}
+		c.MaxUploadMB = n
 	}
 	if v, _ := pick("QINYUAN_TIMEOUT_SECONDS", fileVals, ""); v != "" {
 		n, err := strconv.Atoi(v)

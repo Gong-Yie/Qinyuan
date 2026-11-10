@@ -31,6 +31,7 @@ type Graph interface {
 	CountIntentState(ctx context.Context, runID int64, state string) (int, error)
 	HasActiveIntent(ctx context.Context, runID int64) (bool, error)
 	ListEntitiesForRun(ctx context.Context, runID int64, limit int) ([]*model.Entity, error)
+	Attachments(ctx context.Context, runID int64) ([]*model.Attachment, error)
 	PlanGraph(ctx context.Context, runID int64) (*model.PlanGraph, error)
 	Coverage(ctx context.Context, runID int64) (*model.Coverage, error)
 	CampaignViewForRun(ctx context.Context, runID int64) (*model.CampaignView, error)

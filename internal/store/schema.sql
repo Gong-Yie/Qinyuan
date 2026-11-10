@@ -657,3 +657,28 @@ CREATE TABLE IF NOT EXISTS connector_deliveries (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_connector_delivery ON connector_deliveries(connector, event_key);
 CREATE INDEX IF NOT EXISTS idx_connector_delivery_ext ON connector_deliveries(connector, external_id)
     WHERE external_id <> '';
+
+-- ---------------------------------------------------------------------------
+-- M12：任务附件（只读投喂）
+--
+-- 取舍：附件**不是**给 agent 的任意文件系统权限，而是"每任务一组只读材料"：
+--   - 内容按 sha256 存在 data/runs/<run>/attachments/ 下（同一任务内同内容只存一份）；
+--   - agent 只能通过 list_attachments / read_attachment 读，**没有** bash、没有路径参数；
+--   - summary 是"前 200 字摘要"，注入态势用（模型先知道有什么，再决定读哪个）。
+-- 附件内容属于不可信输入（I18）：工具返回会带"不可信"标记，prompt 也这么写。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS attachments (
+    id         BIGSERIAL PRIMARY KEY,
+    run_id     BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,                      -- 展示名（已清洗，去掉路径分隔符）
+    kind       TEXT NOT NULL DEFAULT 'text'
+               CHECK (kind IN ('text','binary','archive','image')),
+    mime       TEXT NOT NULL DEFAULT '',
+    size       BIGINT NOT NULL DEFAULT 0,
+    sha256     TEXT NOT NULL,
+    path       TEXT NOT NULL DEFAULT '',           -- 相对 dataDir
+    summary    TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_run ON attachments(run_id, id);

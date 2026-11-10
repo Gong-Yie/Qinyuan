@@ -520,6 +520,7 @@ async function createRun() {
     worker_count: Number($('nt-workers').value) || 2,
     timeout_seconds: Number($('nt-timeout').value) || 0,
   };
+  const files = $('nt-files') ? $('nt-files').files : null;
   try {
     const run = await api('/api/runs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -527,6 +528,17 @@ async function createRun() {
     closeNewTask();
     // 清空输入，下次打开是干净的（但只在成功后才清）。
     ['nt-goal', 'nt-target', 'nt-name', 'nt-timeout'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
+    // 附件要在启动之前传：这样第 0 轮拆解就能看到附件清单。
+    if (files && files.length) {
+      try {
+        const up = await uploadAttachments(run.id, files);
+        toast(`任务 #${run.id}：已上传 ${up.count} 个附件`);
+      } catch (e) {
+        toast(`任务 #${run.id} 已创建，但附件上传失败：${e.message}`);
+      }
+      const fi = $('nt-files');
+      if (fi) fi.value = '';
+    }
     try {
       await api(`/api/runs/${run.id}/control`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"action":"start"}',
@@ -556,7 +568,8 @@ async function renderRun() {
 
   const tabs = [
     ['overview', '概览'], ['sessions', '会话'], ['traffic', '流量'], ['graph', '链路'],
-    ['plan', '计划'], ['timeline', '时间线'], ['cost', '成本'], ['coverage', '覆盖'], ['covgraph', '覆盖图'],
+    ['plan', '计划'], ['timeline', '时间线'], ['attachments', '附件'],
+    ['cost', '成本'], ['coverage', '覆盖'], ['covgraph', '覆盖图'],
   ];
   $('view').innerHTML = `
     <div class="stack">
@@ -625,6 +638,7 @@ async function drawTab(id, tab) {
   if (tab === 'graph') return drawGraph(id, body);
   if (tab === 'plan') return drawPlan(id, body);
   if (tab === 'timeline') return drawTimeline(id, body);
+  if (tab === 'attachments') return drawAttachments(id, body);
   if (tab === 'cost') return drawCost(id, body);
   if (tab === 'coverage') return drawCoverage(id, body);
   if (tab === 'covgraph') return drawCoverageGraph(id, body);
@@ -1388,6 +1402,60 @@ async function drawTimeline(id, body) {
   body.querySelectorAll('.tl-row').forEach((r) => {
     r.addEventListener('click', () => openDrawerRaw(r.querySelector('.tl-name').textContent.trim(), r.dataset.attrs));
   });
+}
+
+/* 附件（M12）：列表 / 上传 / 下载 / 删除。agent 只能只读，这里给人用。 */
+async function drawAttachments(id, body) {
+  const data = await api(`/api/runs/${id}/attachments`);
+  const items = data.items || [];
+  body.innerHTML = `
+    <div class="card-body">
+      <div class="toolbar">
+        <input type="file" id="att-files" multiple />
+        <button class="btn btn-primary" id="att-upload">上传</button>
+        <span class="muted">单文件 ≤ 32MB；上传后 agent 用 <code>list_attachments</code> / <code>read_attachment</code> 只读访问</span>
+      </div>
+      ${items.length ? `<table class="table">
+        <thead><tr><th>#</th><th>名称</th><th>类型</th><th class="num">大小</th><th>摘要</th><th></th></tr></thead>
+        <tbody>${items.map((a) => `<tr>
+          <td class="mono">#${a.id}</td>
+          <td class="mono">${esc(a.name)}</td>
+          <td>${esc(a.kind)}</td>
+          <td class="num">${fmtInt(a.size)}</td>
+          <td class="muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.summary || '')}</td>
+          <td class="actions">
+            <a class="btn btn-sm btn-ghost" href="${a.download}">下载</a>
+            <button class="btn btn-sm btn-danger" data-delatt="${a.id}">删除</button>
+          </td>
+        </tr>`).join('')}</tbody>
+      </table>` : empty('还没有附件', '上传题目文件/源码/配置；agent 会先看到清单摘要，再按需读正文。')}
+    </div>`;
+
+  $('att-upload').addEventListener('click', async () => {
+    const files = $('att-files').files;
+    if (!files || !files.length) { toast('先选文件'); return; }
+    try {
+      const r = await uploadAttachments(id, files);
+      toast(`已上传 ${r.count} 个附件${r.errors && r.errors.length ? `（${r.errors.length} 个失败）` : ''}`);
+      await drawAttachments(id, body);
+    } catch (e) { toast('上传失败：' + e.message); }
+  });
+  body.querySelectorAll('[data-delatt]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      if (!window.confirm('删除这个附件？agent 之后就读不到了。')) return;
+      try {
+        await api(`/api/runs/${id}/attachments/${b.dataset.delatt}`, { method: 'DELETE' });
+        toast('已删除');
+        await drawAttachments(id, body);
+      } catch (e) { toast('删除失败：' + e.message); }
+    });
+  });
+}
+
+async function uploadAttachments(runID, fileList) {
+  const fd = new FormData();
+  [...fileList].forEach((f) => fd.append('file', f, f.name));
+  return api(`/api/runs/${runID}/attachments`, { method: 'POST', body: fd });
 }
 
 /* 战役列表（P3-1） */

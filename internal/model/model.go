@@ -271,6 +271,23 @@ type TokenUsage struct {
 	CacheWrite int
 }
 
+// Attachment 是任务附件（只读投喂给 agent 的材料）。
+//
+// 它**不是**文件系统权限：agent 只能按 name/id 读这一段内容，路径由服务端决定，
+// 内容按不可信输入处理（I18）。
+type Attachment struct {
+	ID        int64
+	RunID     int64
+	Name      string
+	Kind      string // text | binary | archive | image
+	Mime      string
+	Size      int64
+	SHA256    string
+	Path      string // 相对 DataDir
+	Summary   string // 前 200 字（注入态势用）
+	CreatedAt time.Time
+}
+
 // DeriveStatus 是全站唯一的"任务显示状态"推导函数。
 //
 // 依据 升级计划 P2-2：列表、详情、编排工具必须调同一个函数，

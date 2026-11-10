@@ -31,6 +31,10 @@ func TestBuildOverviewOnMemstore(t *testing.T) {
 		Payload: []byte(`{"summary":"首页是 nginx","confidence":"observed"}`)})
 	ms.AddEdge(7, model.Edge{SrcID: openID, Rel: model.RelYields, DstID: factID})
 	ms.AddEntity(7, &model.Entity{ID: 1, Kind: "subdomain", Domain: "api.example.com"})
+	// M12：附件清单要进态势（模型先知道有什么，再决定读哪个）。
+	ms.AddAttachment(7, &model.Attachment{
+		Name: "chall.zip", Kind: "archive", Size: 1234, Summary: "题目压缩包，含 src/",
+	})
 
 	// 计划图：3 步，只有第 2 步 ready。
 	ms.SetPlan(7, &store.PlanGraph{
@@ -78,5 +82,11 @@ func TestBuildOverviewOnMemstore(t *testing.T) {
 	}
 	if ov.Entities != 1 {
 		t.Fatalf("实体数 = %d，期望 1", ov.Entities)
+	}
+	if ov.AttachmentsTotal != 1 || len(ov.Attachments) != 1 {
+		t.Fatalf("附件清单不对：total=%d %+v", ov.AttachmentsTotal, ov.Attachments)
+	}
+	if ov.Attachments[0].Name != "chall.zip" || ov.Attachments[0].Kind != "archive" {
+		t.Fatalf("附件字段不对：%+v", ov.Attachments[0])
 	}
 }

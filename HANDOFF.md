@@ -51,6 +51,7 @@
 | M9 | 鉴权：Bearer 令牌（viewer/operator/admin）+ 会话 Cookie + CSRF + 登录限速 + 非回环必须有鉴权（`docs/17`） | ✅ |
 | M10 | 控制台「新建任务」表单 + `can_start`（created/queued 可一键启动，修复"建了但不动"）（`docs/16 §6`） | ✅ |
 | M11 | 新建任务改成**抽屉**（表单移出 `#view`）+ 输入中不轮询 + 列表结构签名跳过（修"输入框老被刷新"）（`docs/16 §7`） | ✅ |
+| M12 | 任务附件：上传（内容寻址）+ 清单注入态势/goals + 只读工具 `list_attachments`/`read_attachment`（`docs/18`） | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -156,6 +157,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_AUTH_TOKENS` | 空 | 多令牌带角色：`tok:viewer,tok2:operator,tok3:admin` |
 | `QINYUAN_SESSION_TTL_HOURS` | `12` | 会话时长（1..168）；会话在内存，重启即全员登出 |
 | `QINYUAN_COOKIE_SECURE` | `0` | 反代 + HTTPS 时设 1（会话 cookie 只走 TLS） |
+| `QINYUAN_MAX_UPLOAD_MB` | `32` | 单个附件上限（1..512）；超限直接 400 |
 
 ---
 
@@ -175,7 +177,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 06-M4c-流式与committed.md
 │   ├── 15-M7-平台化七件套.md    trace / outbox / GraphStore / 战役 / 审批SLA / 报告 / 连接器
 │   ├── 16-M8-控制台与DTO迁移.md  战役页 / 运维页 / 时间线 Tab / 批量审批 / DTO 迁 model
-│   └── 17-M9-鉴权.md           令牌/角色 / Cookie 会话 / CSRF / 登录限速 / 启动自检
+│   ├── 17-M9-鉴权.md           令牌/角色 / Cookie 会话 / CSRF / 登录限速 / 启动自检
+│   └── 18-M12-附件.md          上传 / 内容寻址 / 清单注入 / 只读工具 / 不可信输入
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）

@@ -350,6 +350,8 @@ func NewPlannerRegistry() *Registry {
 		NewProveGoalTool(),
 		NewKillWorkTool(),
 		NewSteerWorkTool(),
+		NewListAttachmentsTool(),
+		NewReadAttachmentTool(),
 	)
 }
 
@@ -365,6 +367,8 @@ func NewWorkerRegistry() *Registry {
 		NewReportFindingTool(),
 		NewNodeDetailTool(),
 		NewListFindingsTool(),
+		NewListAttachmentsTool(),
+		NewReadAttachmentTool(),
 	)
 }
 

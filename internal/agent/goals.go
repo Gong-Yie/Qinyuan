@@ -75,7 +75,10 @@ func (d *GoalDecomposer) Decompose(ctx context.Context, runID int64, emit Emitte
 		Scopes: domain.NewScopeSet(scopes), Constraints: constraints,
 		DataDir: d.DataDir, MaxOutput: d.MaxOutput,
 	}
-	system := BuildGoalsSystem(run, domain.NewScopeSet(scopes).Describe())
+	// M12：附件清单要进拆解者视野 —— 否则它会拆出"读材料"这类不存在的目标，
+	// 或者完全不知道题目给了什么。
+	atts, _ := d.Store.Attachments(ctx, runID)
+	system := BuildGoalsSystem(run, domain.NewScopeSet(scopes).Describe()) + renderAttachmentsBlock(atts)
 	msgs := []llm.Message{{Role: llm.RoleUser, Text: BuildGoalsUserMessage(run, scopes)}}
 	specs := d.Registry.Specs()
 

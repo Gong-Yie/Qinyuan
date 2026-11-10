@@ -110,6 +110,9 @@
     <label>任务名（可选）
       <input id="nt-name" class="search" placeholder="CTF-AcmeNotes" />
     </label>
+    <label>附件（可选，可多选；上传后 agent 可按需读取）
+      <input id="nt-files" class="search" type="file" multiple />
+    </label>
     <p class="muted" style="font-size:12px;margin:2px 0 0">
       目标会按“最小范围”登记授权。打本机靶场需要 serve 带 <code>QINYUAN_ALLOW_LOOPBACK=1</code>。
     </p>

@@ -41,6 +41,8 @@ type Server struct {
 	Connectors *connectors.Fanout
 	// Auth 是 M9 的鉴权层（nil = 未启用；New 会给一个 Disabled 的实例）。
 	Auth *auth.Authenticator
+	// MaxUploadMB 是单个附件的大小上限（0 = 默认 32MB）。
+	MaxUploadMB int
 }
 
 // New 构造。
@@ -131,6 +133,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{id}/sync-tickets", s.handleSyncTickets)
 	mux.HandleFunc("POST /api/runs/{id}/ci-export", s.handleCIExport)
 	mux.HandleFunc("POST /api/runs/{id}/ci-result", s.handleCIResult)
+
+	// M12：任务附件（上传/列表/下载/删除）。agent 侧只有只读工具，走不到这里。
+	mux.HandleFunc("POST /api/runs/{id}/attachments", s.handleUploadAttachment)
+	mux.HandleFunc("GET /api/runs/{id}/attachments", s.handleListAttachments)
+	mux.HandleFunc("GET /api/runs/{id}/attachments/{aid}", s.handleDownloadAttachment)
+	mux.HandleFunc("DELETE /api/runs/{id}/attachments/{aid}", s.handleDeleteAttachment)
 
 	// 控制台静态资源（go:embed）。必须放在最后：`GET /` 会兜住所有非 API 路径。
 	mux.Handle("GET /", s.staticHandler())

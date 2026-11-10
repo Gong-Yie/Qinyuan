@@ -338,6 +338,7 @@ func cmdServe(args []string, log *slog.Logger) int {
 	}
 	srv := server.New(st, eng, log)
 	srv.Connectors = fanout
+	srv.MaxUploadMB = cfg.MaxUploadMB
 	authn, err := buildAuth(cfg, log)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "鉴权配置错误：", err)
