@@ -94,7 +94,7 @@ go test ./...
 go test ./internal/store/ -run TestClaimConcurrentNoDuplicates -count=20   # 并发用例反复跑
 ```
 
-> `-race` 在 `windows/386` 上不可用；换 64 位 Go 后应把 `-race` 加进 CI。
+> 竞态检测：`pwsh -File scripts/race.ps1`（64 位 Go + mingw-w64；当前全量 `-race` 已通过，无数据竞争）。
 
 ---
 
