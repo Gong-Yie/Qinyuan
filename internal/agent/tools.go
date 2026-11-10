@@ -40,6 +40,8 @@ type Context struct {
 	Final bool
 	// KillWork 由编排层注入（planner 的 kill_work 用；worker 为 nil）。
 	KillWork func(intentID int64) bool
+	// SteerWork 由编排层注入（planner 的 steer_work 用；worker 为 nil）。
+	SteerWork func(intentID int64, message string) bool
 	// RefreshRequested 由 refresh_overview 置位：下一轮 planner 重新给全量态势。
 	// planner 为 nil（worker 没有这个工具）。
 	RefreshRequested *bool
@@ -100,6 +102,28 @@ func NewRegistry(tools ...*Tool) *Registry {
 
 // Names 返回工具名（按注册顺序）。
 func (r *Registry) Names() []string { return append([]string(nil), r.order...) }
+
+// Without 返回一个去掉指定工具的新 registry（收尾轮用它隐藏危险工具）。
+//
+// 返回新对象而不是原地删：同一个 registry 会被别的回合复用，改掉了会污染下一轮。
+func (r *Registry) Without(names ...string) *Registry {
+	if r == nil {
+		return nil
+	}
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := &Registry{tools: make(map[string]*Tool, len(r.tools))}
+	for _, name := range r.order {
+		if drop[name] {
+			continue
+		}
+		out.tools[name] = r.tools[name]
+		out.order = append(out.order, name)
+	}
+	return out
+}
 
 // Specs 给模型看的定义。
 func (r *Registry) Specs() []llm.ToolSpec {

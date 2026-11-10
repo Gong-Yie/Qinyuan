@@ -47,6 +47,11 @@ type Config struct {
 	GoalsMaxTurns    int // 拆解 agent 的回合上限（默认 8）
 	PlannerFullEvery int // 每 K 轮给一次全量态势（默认 20）
 	DeltaLimit       int // 单轮增量最多多少条变化（默认 200）
+
+	// M4：长跑可靠性。
+	SettlementTurns     int           // 撞预算后的收尾轮数（默认 3）
+	SettlementTimeout   time.Duration // 收尾轮独立预算（默认 2 分钟）
+	ContextWindowTokens int           // 上下文窗口估计（0 = 关闭压缩）
 }
 
 type runRuntime struct {
@@ -74,6 +79,7 @@ type Engine struct {
 	taskCancels map[int64]context.CancelCauseFunc
 	workCancels map[int64]context.CancelCauseFunc
 	workRuns    map[int64]int64
+	steerBox    map[int64][]string // 单条意图的纠偏队列（worker 在下一次工具调用前取走）
 	runtimes    map[int64]*runRuntime
 	notifies    map[int64]chan struct{}
 	triggers    map[int64][]agent.Trigger
@@ -121,6 +127,7 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 		taskCancels: map[int64]context.CancelCauseFunc{},
 		workCancels: map[int64]context.CancelCauseFunc{},
 		workRuns:    map[int64]int64{},
+		steerBox:    map[int64][]string{},
 		runtimes:    map[int64]*runRuntime{},
 		notifies:    map[int64]chan struct{}{},
 		triggers:    map[int64][]agent.Trigger{},
@@ -141,16 +148,25 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 		Store: st, Providers: providers, Registry: agent.NewGoalsRegistry(),
 		DataDir: cfg.DataDir, MaxOutput: cfg.MaxOutput, MaxTurns: cfg.GoalsMaxTurns, Logger: log,
 	}
+	// planner 的两只手（kill / steer）只能在引擎里实现：它们要摸到 work 的 ctx 与队列。
+	e.planner.KillWork = e.KillWork
+	e.planner.SteerWork = e.SteerWork
 	return e
 }
 
 func (e *Engine) worker() *agent.Worker {
-	return &agent.Worker{
+	w := &agent.Worker{
 		Store: e.Store, Providers: e.Providers, Registry: e.WorkerTools,
 		DataDir: e.Cfg.DataDir, AllowLoopback: e.Cfg.AllowLoopback,
 		MaxOutput: e.Cfg.MaxOutput, MaxTurns: e.Cfg.MaxTurns,
 		MaxDuration: e.Cfg.MaxDuration, Logger: e.Log,
+		Settlement: agent.SettlementConfig{
+			MaxTurns: e.Cfg.SettlementTurns,
+			Timeout:  e.Cfg.SettlementTimeout,
+		},
+		Compaction: agent.CompactionConfig{WindowTokens: e.Cfg.ContextWindowTokens},
 	}
+	return w
 }
 
 // ---------- 任务生命周期 ----------
@@ -312,6 +328,39 @@ func (e *Engine) KillWork(intentID int64) bool {
 	}
 	cancel(ErrKilledByPlanner)
 	return true
+}
+
+// SteerWork 给一条在跑的意图排一条纠偏消息（planner 的 steer_work）。
+//
+// 只有该意图**确实在跑**时才接受：否则消息会永远等不到人取（意图已经结束）。
+func (e *Engine) SteerWork(intentID int64, message string) bool {
+	if strings.TrimSpace(message) == "" {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.workCancels[intentID]; !ok {
+		return false
+	}
+	e.steerBox[intentID] = append(e.steerBox[intentID], message)
+	return true
+}
+
+// drainSteer 取走该意图的下一批纠偏消息（worker 在每次工具调用前调用）。
+func (e *Engine) drainSteer(intentID int64) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	q := e.steerBox[intentID]
+	if len(q) == 0 {
+		return "", false
+	}
+	msg := q[0]
+	if len(q) == 1 {
+		delete(e.steerBox, intentID)
+	} else {
+		e.steerBox[intentID] = q[1:]
+	}
+	return msg, true
 }
 
 // Restore 启动恢复：把崩溃残留的 running 打回 open，并给非终态任务重建循环。
@@ -650,7 +699,9 @@ func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, err
 		cancel(ErrPausedByUser)
 	}
 
-	out, execErr := e.worker().Execute(workCtx, runID, intent.ID, owner, e.emit)
+	w := e.worker()
+	w.Steer = func() (string, bool) { return e.drainSteer(intent.ID) }
+	out, execErr := w.Execute(workCtx, runID, intent.ID, owner, e.emit)
 	cause := context.Cause(workCtx)
 	cancel(nil)
 
@@ -908,6 +959,7 @@ func (e *Engine) unregisterWork(intentID int64) {
 	e.mu.Lock()
 	delete(e.workCancels, intentID)
 	delete(e.workRuns, intentID)
+	delete(e.steerBox, intentID) // 意图已经结束：留着的纠偏消息再也没人取
 	e.mu.Unlock()
 }
 

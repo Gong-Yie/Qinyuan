@@ -45,6 +45,11 @@ type Config struct {
 	PlannerFullEvery int // planner 每 K 轮给一次全量态势
 	DeltaLimit       int // 单轮增量最多多少条变化（超过退全量）
 
+	// M4：长跑可靠性。
+	ContextWindowK    int // 上下文窗口（K tokens）：压缩用的估计值；0 = 关闭压缩
+	SettlementTurns   int // 撞预算后的收尾轮数（0 = 关闭）
+	SettlementTimeout time.Duration
+
 	LLM LLMConfig
 }
 
@@ -88,15 +93,18 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		DataDir:          "data",
-		Addr:             "127.0.0.1:8787",
-		LogLevel:         "info",
-		MaxToolOutput:    30000,
-		DefaultMaxTurns:  12,
-		DefaultTimeout:   10 * time.Minute,
-		GoalsMaxTurns:    8,
-		PlannerFullEvery: 20,
-		DeltaLimit:       200,
+		DataDir:           "data",
+		Addr:              "127.0.0.1:8787",
+		LogLevel:          "info",
+		MaxToolOutput:     30000,
+		DefaultMaxTurns:   12,
+		DefaultTimeout:    10 * time.Minute,
+		GoalsMaxTurns:     8,
+		PlannerFullEvery:  20,
+		DeltaLimit:        200,
+		ContextWindowK:    200,
+		SettlementTurns:   3,
+		SettlementTimeout: 2 * time.Minute,
 		LLM: LLMConfig{
 			Provider:    "fake",
 			BaseURL:     "https://api.openai.com/v1",
@@ -158,6 +166,27 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_DELTA_LIMIT 非法：%q（10..5000）", v)
 		}
 		c.DeltaLimit = n
+	}
+	if v, _ := pick("QINYUAN_CONTEXT_WINDOW_K", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 2000 {
+			return nil, fmt.Errorf("QINYUAN_CONTEXT_WINDOW_K 非法：%q（0=关闭压缩，1..2000）", v)
+		}
+		c.ContextWindowK = n
+	}
+	if v, _ := pick("QINYUAN_SETTLEMENT_TURNS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 20 {
+			return nil, fmt.Errorf("QINYUAN_SETTLEMENT_TURNS 非法：%q（0=关闭收尾轮，1..20）", v)
+		}
+		c.SettlementTurns = n
+	}
+	if v, _ := pick("QINYUAN_SETTLEMENT_TIMEOUT_SECONDS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 10 || n > 900 {
+			return nil, fmt.Errorf("QINYUAN_SETTLEMENT_TIMEOUT_SECONDS 非法：%q（10..900）", v)
+		}
+		c.SettlementTimeout = time.Duration(n) * time.Second
 	}
 
 	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)

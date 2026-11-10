@@ -4,7 +4,7 @@
 > §11（已修缺陷）和 §14（常见坑）是**最省时间的两节**——里面每一条都是真实踩过的。
 > 如果你只想知道"能不能跑"，直接看 §2 的复制粘贴命令。
 >
-> 文档时间点：M3.5 完成（目标拆解 + 差分态势）、`-race` 全绿之后。代码以 `git log` 为准，不以本文为准。
+> 文档时间点：M4a 完成（收尾轮 + 压缩 + 纠偏）、`-race` 全绿之后。代码以 `git log` 为准，不以本文为准。
 
 ---
 
@@ -38,7 +38,9 @@
 | M2 | planner 主链（notify/debounce/心跳/六闸门）、OpenAI 兼容 provider、超时收尾、启动恢复 | ✅ |
 | M3a | 计划图（plan/step + depends_on + expected_evidence 规则判定）、覆盖度、off_plan 逃生门 | ✅ |
 | M3.5 | 第 0 轮 goals 拆解（`set_goals`/`set_constraints`/`add_scope`）+ 差分态势（P1-2：`rev` 版本戳 / 增量输入 / `refresh_overview`） | ✅ |
-| M4 | 流式 + settlement + compaction + steer_work + 删除流水线 + 准入队列 | ❌ 未做 |
+| M4a | settlement 收尾轮 + compaction/micro-compact + `steer_work` 实时纠偏 | ✅ |
+| M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列 + 完整启动恢复 | ❌ 未做 |
+| M4c | 流式输出 + committed 边界 | ❌ 未做 |
 | M5 | activity SSE + Next.js 静态导出 + 链路图 | ❌ 未做 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
 
@@ -131,6 +133,9 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_GOALS_MAX_TURNS` | `8` | 第 0 轮目标拆解的回合上限（1..30） |
 | `QINYUAN_PLANNER_FULL_EVERY` | `20` | planner 每 K 轮给一次全量态势（其余给增量） |
 | `QINYUAN_DELTA_LIMIT` | `200` | 单轮增量最多多少条变化，超过退全量（10..5000） |
+| `QINYUAN_SETTLEMENT_TURNS` | `3` | 撞预算后的收尾轮数（0 = 关闭） |
+| `QINYUAN_SETTLEMENT_TIMEOUT_SECONDS` | `120` | 收尾轮独立预算（10..900） |
+| `QINYUAN_CONTEXT_WINDOW_K` | `200` | 上下文窗口估计（K token）；0 = 关闭压缩 |
 
 ---
 
@@ -144,7 +149,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 00-设计定稿.md          决策 / 不变量 / 偏离 / 验收对照
 │   ├── 01-M2-规划者与模型接入.md
 │   ├── 02-M3-计划图与覆盖度.md
-│   └── 03-M3.5-目标拆解与差分态势.md
+│   ├── 03-M3.5-目标拆解与差分态势.md
+│   └── 04-M4a-撞预算不白跑.md
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -186,7 +192,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 9.0k 行、测试 ≈ 2.7k 行、schema ≈ 330 行。51 个测试。
+生产 Go ≈ 9.6k 行、测试 ≈ 3.1k 行、schema ≈ 330 行。58 个测试。
 
 ---
 
@@ -356,6 +362,9 @@ ResetRunningIntents()         # running → open（没有活着的 worker 拥有
 | `GoalsMaxTurns` | 8 | 第 0 轮拆解回合上限（`QINYUAN_GOALS_MAX_TURNS`） |
 | `PlannerFullEvery` | 20 | 每 K 轮给一次全量态势（`QINYUAN_PLANNER_FULL_EVERY`） |
 | `DeltaLimit` | 200 | 单轮增量上限，超过退全量（`QINYUAN_DELTA_LIMIT`） |
+| `SettlementTurns` | 3 | 撞预算后的收尾轮数（`QINYUAN_SETTLEMENT_TURNS`，0=关） |
+| `SettlementTimeout` | 2min | 收尾轮独立预算（`QINYUAN_SETTLEMENT_TIMEOUT_SECONDS`） |
+| `ContextWindowTokens` | 200k | 压缩阈值用的窗口估计（`QINYUAN_CONTEXT_WINDOW_K`，0=关） |
 
 ---
 
@@ -377,6 +386,7 @@ ResetRunningIntents()         # running → open（没有活着的 worker 拥有
 | `add_intent` | ✅ | — | — | 有计划图时必须挂 `step_id` |
 | `prove_goal` | ✅ | — | — | 唯一能让任务正常结束的路径之一 |
 | `kill_work` | ✅ | — | — | 止损 |
+| `steer_work` | ✅ | — | — | 实时纠偏：下一次工具调用前生效并拦下它 |
 | `http_request` | — | ✅ | — | 范围闸门 + 出网守卫 |
 | `insert_assets` | — | ✅ | — | 只登记实体，不写结论 |
 | `record_fact` | — | ✅ | — | evidence 必填；自动满足计划步骤 |
@@ -539,6 +549,10 @@ type Factory interface  { For(sessionKey string) Provider }
 | engine | `TestEnsureGoalsDecomposesOnce` | 拆解写目标/约束/范围；seed 目标退役；第二次 0 次模型调用 |
 | engine | `TestEnsureGoalsFailureKeepsSeedGoal` | 失败不写 goals_at、seed 目标兜底、留 system 记录 |
 | engine | `TestEngineGoalsRoundBeforePlanner` | 端到端：先拆解再规划（闸门顺序） |
+| engine | `TestSettlementWritesBackOnMaxTurns` | 撞 `MaxTurns` → 收尾轮再写一条事实；终态仍 `exhausted`；收尾轮隐藏 `http_request` |
+| engine | `TestSteerWorkBlocksNextToolCall` | 纠偏在下一次工具调用前生效、被拦下的写入没落库、模型看到纠偏文本 |
+| agent | `TestCompactionNoOpUnderThreshold` / `MicrosOldToolResults` / `SummarizesAndKeepsPairing` / `SummarizerFailureStillCompacts` | 压缩只在需要时发生；不破坏 tool 配对；摘要失败不拖垮整轮 |
+| agent | `TestEstimateTokensMonotonic` | 估计值随长度单调、CJK 至少一字一 token |
 | llm | `TestOpenAICompleteMapsTools` / `ErrorClassification` / `LooksLikeQuota` / `RetriesTransientThenGivesUp` | 请求/响应映射 + 错误分类 + 重试上限 |
 
 ### 10.3 尚未覆盖（要在对应里程碑补）
@@ -584,12 +598,17 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 
 ### M4
 
-- 非流式 → 流式（以及 committed 边界、settlement 收尾轮）；
-- compaction / micro-compact；
-- `steer_work`（planner 实时纠偏在跑的 work）：目前只能 `kill_work`；
-- 删除流水线（屏障 → 排水 → 两阶段清理）；API 的 `stop` 现在明确返回 **501**，不假装停了；
-- 准入队列（`queued` 字段已在库，FIFO 未实现）；
-- 重启恢复的"完整版"（deadline 重建、暂存删除恢复）。
+- ~~settlement 收尾轮~~ ✅ / ~~compaction、micro-compact~~ ✅ / ~~`steer_work`~~ ✅（M4a，见 `docs/04`）；
+- **非流式 → 流式**（以及 committed 边界）：M4c；
+- **删除流水线**（屏障 → 排水 → 两阶段清理）；API 的 `stop` 现在明确返回 **501**，不假装停了：M4b；
+- **准入队列**（`queued` 字段已在库，FIFO 未实现）：M4b；
+- **重启恢复的"完整版"**（deadline 重建、暂存删除恢复）：M4b。
+
+### M4a 的已知限制
+
+- planner 侧没有压缩（它每轮最多 6 回合，态势每轮重取，收益低）；
+- token 估计是启发式（CJK 1 字 1 token），没有接 tokenizer；
+- 没有"快到上限时提前提醒模型收拢"——只有撞到才收尾。
 
 ### M5 / M6
 
@@ -661,12 +680,17 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     也不要在失败的 CAS 之前 `bumpVersion`（浪费版本号且会在增量里留下"没发生的变化"）。
 18. **`DeltaSince` 的 `to` 必须先快照**：先用 `rev <= to` 过滤再查，否则"读到一半又有写入"会让窗口与数据不一致。
 19. **拆解失败不要写 `goals_at`**：写了就再也不会重试，用户看到的是"系统只把原话当目标"。
+20. **收尾轮不能复用 execCtx**：撞 `MaxDuration` 时它已经过期，收尾轮会用独立预算（`Settlement.Timeout`）。
+21. **压缩按"轮"切，不按"条"切**：一轮 = assistant + 它后面的 tool 结果；按条切会留下孤立的 tool 消息，服务端直接 400。
+22. **`steer_work` 必须回一条 `RoleTool`**（否则 tool_calls 没有结果 → 400）；意图结束时要清空 `steerBox`。
+23. **`record_fact` 的入参是 `facts[] + intent_id`**，不是顶层 `summary`/`evidence` —— 写测试时最容易踩。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+1ea3168 M3.5: 第 0 轮目标拆解（set_goals/set_constraints/add_scope）+ 差分态势（rev 版本戳/增量输入/refresh_overview）
 d73d6f4 文档：新增 HANDOFF.md（环境/状态机/已修缺陷/扩展指南），README 加入口
 077f3d3 工具链：接入 mingw-w64，scripts/race.ps1 跑 -race；全量竞态检测通过
 00250f4 工具链：scripts/go.ps1 改为优先系统 64 位 Go（amd64），便携版兜底
@@ -676,16 +700,15 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-**M3.5 的改动还在工作区，未提交**（按业主的习惯：先 review 再提交）。
-改动清单：`docs/03` + `internal/store/{delta,goals,graph,plans,runs}.go` + `internal/agent/{delta,goals,tool_goals,planner,prompt,tool_read}.go`
-+ `internal/engine/engine.go` + `internal/config` + `internal/server` + 相应测试；
-另外 `go fmt` 顺手修了 `plan_test.go` / `tool_plan.go` 的格式（纯空白）。
-`docs/00–03` 是设计与验收记录；本文是状态快照。
+**M4a 的改动还在工作区，未提交**（同上：先 review 再提交）。
+改动清单：`docs/04` + `internal/agent/{settlement,settlement_run,compaction}.go` + `internal/agent/{worker,tools,tool_planner,planner}.go`
++ `internal/engine/engine.go` + `internal/config` + `cmd/qinyuan/main.go` + 相应测试。
+`docs/00–04` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 51 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 58 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 ```

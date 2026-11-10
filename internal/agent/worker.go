@@ -25,6 +25,10 @@ type Outcome struct {
 	Assets   int
 	Usage    llm.Usage
 	Summary  string
+	// Settlement=true 表示这次执行跑过收尾轮（撞预算后把结果写回）。
+	Settlement bool
+	// Compacted 记录执行期间触发过几次上下文压缩（0 = 没触发）。
+	Compacted int
 }
 
 // Reason 取值：撞上限 ≠ 完成，必须分开。
@@ -47,6 +51,14 @@ type Worker struct {
 	MaxTurns      int
 	MaxDuration   time.Duration
 	Logger        *slog.Logger
+
+	// Settlement 撞预算时的收尾轮配置（零值 = 默认 3 轮、隐藏 http_request）。
+	Settlement SettlementConfig
+	// Compaction 上下文压缩配置（WindowTokens=0 表示关闭）。
+	Compaction CompactionConfig
+	// Steer 由编排层注入：每次工具调用前问一次"有没有实时纠偏"。
+	// 返回非空消息时，**本次工具调用不执行**，把消息作为工具结果交给模型。
+	Steer func() (string, bool)
 }
 
 // Execute 跑一条已领取（state=running）的意图。
@@ -131,6 +143,28 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 			break
 		}
 		out.Turns = turn
+
+		// 上下文预算：超阈值就先压（micro-compact → 摘要）。压不动也继续跑，
+		// 由模型自己撞 413 —— 那会比"直接失败"更容易在日志里定位。
+		if w.Compaction.enabled() {
+			if compacted, changed, cerr := compactMessages(execCtx, provider, w.Compaction, system, msgs); changed {
+				msgs = compacted
+				out.Compacted++
+				emit(execCtx, &model.Activity{
+					RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+					Summary: fmt.Sprintf("上下文压缩：%d 条消息 → 约 %d token（第 %d 次）",
+						len(msgs), estimateMessages(system, msgs), out.Compacted),
+					Metadata: map[string]any{"compacted": out.Compacted, "estimated_tokens": estimateMessages(system, msgs)},
+				})
+			} else if cerr != nil {
+				emit(execCtx, &model.Activity{
+					RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+					Summary: "上下文压缩失败（本轮继续，可能触发 413）",
+					Detail:  cerr.Error(),
+				})
+			}
+		}
+
 		resp, err := provider.Complete(execCtx, &llm.Request{
 			SessionKey: fmt.Sprintf("run%d-intent%d", runID, intentID),
 			System:     system,
@@ -185,6 +219,33 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 				Metadata: map[string]any{"tool_call_id": tc.ID},
 			})
 
+			// 实时纠偏（steer_work）：在工具真正执行**之前**问一次。
+			// 有消息就拦下这次调用，把消息当工具结果交回模型 —— 不打断、不丢进展。
+			if w.Steer != nil {
+				if msg, ok := w.Steer(); ok {
+					res := Errorf("【规划者实时纠偏】%s\n（本次工具调用 %s 未执行，请据此调整下一步；若与你原本打算冲突，以此为准。）",
+						msg, tc.Name)
+					emit(execCtx, &model.Activity{
+						RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+						Summary:  "收到规划者纠偏，已拦下本次工具调用：" + tc.Name,
+						Detail:   msg,
+						Metadata: map[string]any{"tool_call_id": tc.ID, "steer": true},
+					})
+					emit(execCtx, &model.Activity{
+						RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActToolResult,
+						Tool: tc.Name, ToolUseID: tc.ID, IsError: true,
+						Summary:  model.TrimSummary(oneLine(res.Text), 200),
+						Detail:   clampOutput(rc, "tool_output", res.Text),
+						Metadata: map[string]any{"tool_call_id": tc.ID, "steer": true},
+					})
+					msgs = append(msgs, llm.Message{
+						Role: llm.RoleTool, ToolCallID: tc.ID, Name: tc.Name,
+						Text: res.Text, IsError: true,
+					})
+					continue
+				}
+			}
+
 			res := w.Registry.Call(execCtx, rc, tc.Name, tc.Input)
 			if !res.IsError {
 				switch tc.Name {
@@ -215,6 +276,12 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 		}
 	}
 
+	// 撞预算 → 收尾轮：不再探测，把已经拿到的写回去。
+	// 只有"被掐断"（撞步数/撞时长）才收尾；正常跑完、报错、被取消都不做。
+	if out.Reason == ReasonMaxTurns || out.Reason == ReasonTimeout {
+		w.runSettlement(ctx, runID, intentID, owner, rc, emit, msgs, system, out)
+	}
+
 	out.Usage = usage
 	out.Summary = model.TrimSummary(lastText, 800)
 
@@ -228,6 +295,7 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 		Metadata: map[string]any{
 			"reason": out.Reason, "turns": out.Turns,
 			"facts": out.Facts, "findings": out.Findings, "assets": out.Assets,
+			"settlement": out.Settlement, "compacted": out.Compacted,
 		},
 	})
 	return out, nil

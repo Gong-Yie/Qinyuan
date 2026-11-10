@@ -2,9 +2,9 @@
 
 授权 Web 安全测试 Agent —— Go 后端 + PostgreSQL，把探索过程外化成一张**可查询、可审计、可重启**的图，让 LLM 在图上反复"规划 → 执行 → 写回"。
 
-> **当前进度：M0 + M1 + M2 + M3a + M3.5 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、planner（事件唤醒 / 心跳 / add_intent / prove_goal）、OpenAI 兼容 provider、超时收尾、启动恢复、**计划图（step 依赖 + 规则化 done）**、**覆盖度**、**第 0 轮目标拆解（set_goals / set_constraints / add_scope）**、**差分态势（rev 版本戳 + 增量输入 + refresh_overview）**、最小 REST、CLI、端到端 demo、自动化验收都在。
-> 还没有：流式输出与 settlement（M4）、前端/SSE（M5）、审批门与流量录制（M6）。
-> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)。
+> **当前进度：M0 + M1 + M2 + M3a + M3.5 + M4a 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、planner（事件唤醒 / 心跳 / add_intent / prove_goal）、OpenAI 兼容 provider、超时收尾、启动恢复、**计划图（step 依赖 + 规则化 done）**、**覆盖度**、**第 0 轮目标拆解（set_goals / set_constraints / add_scope）**、**差分态势（rev 版本戳 + 增量输入 + refresh_overview）**、**收尾轮（撞预算不白跑）**、**上下文压缩**、**`steer_work` 实时纠偏**、最小 REST、CLI、端到端 demo、自动化验收都在。
+> 还没有：流式输出（M4c）、删除流水线与准入队列（M4b）、前端/SSE（M5）、审批门与流量录制（M6）。
+> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)。
 > **新接手（人或 AI）请先读 [`HANDOFF.md`](HANDOFF.md)**：环境、状态机、已修缺陷、扩展指南都在那里。
 
 ---
@@ -163,7 +163,9 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M2~~ ✅ | planner（事件唤醒 / debounce / 心跳 / `add_intent` / `prove_goal`）+ OpenAI 兼容 provider + 超时收尾 + 启动恢复 | 目标达成自动 done；重启不丢 |
 | ~~M3a~~ ✅ | 计划图（`plan/step` + `depends_on` + `expected_evidence`）+ 规则化 ready/done + 覆盖度 + `off_plan` 逃生门 | 5 步链只有 1 步 ready；事实命中自动解锁下一步；覆盖率只认 fact |
 | ~~M3.5~~ ✅ | 第 0 轮 goals 拆解（`set_goals`/`set_constraints`/`add_scope`）+ 差分态势（P1-2：`rev` 版本戳 / 增量输入 / `refresh_overview`） | 多目标拆分；满规模图上态势 −64%（实测 36%） |
-| M4 | 流式 + 三层预算 + settlement + compaction + steer_work + 删除流水线 + 准入队列 | 跑 2 小时不炸；撞上限不白跑 |
+| ~~M4a~~ ✅ | settlement 收尾轮 + compaction/micro-compact + `steer_work` | 撞 `MaxTurns` 后事实仍写回；长会话不越窗；纠偏在下次工具调用前生效 |
+| M4b | 删除流水线 + 准入队列 + 完整启动恢复 | 删除期间无新写入；队列不插队；重启续跑 |
+| M4c | 流式 + committed 边界 | 未提交可重试、已提交绝不重放 |
 | M5 | activity SSE + Next.js 静态导出 + `go:embed` + 链路图 | 断网 30s 回来不重复不缺口 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | 三种 finding 分别 verified/failed/unverifiable |
 

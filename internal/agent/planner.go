@@ -67,6 +67,11 @@ type Planner struct {
 	// DeltaLimit：单轮增量最多多少条变化（0 = 默认 200），超过降级为全量。
 	DeltaLimit int
 
+	// KillWork / SteerWork：planner 对"在跑的 work"的两只手。
+	// 它们只能作用于本任务，由编排层注入（planner 不 import engine）。
+	KillWork  func(intentID int64) bool
+	SteerWork func(intentID int64, message string) bool
+
 	deltaMu  sync.Mutex
 	lastSeen map[int64]int64 // runID -> 已经给模型看过的版本
 }
@@ -161,11 +166,15 @@ func (p *Planner) PlanRound(ctx context.Context, runID int64, triggers []Trigger
 
 	scopeSet := domain.NewScopeSet(scopes)
 	forceNext := false
+	kill := killWork
+	if kill == nil {
+		kill = p.KillWork
+	}
 	rc := &Context{
 		Store: p.Store, RunID: runID,
 		Scopes: scopeSet, Constraints: constraints,
 		DataDir: p.DataDir, MaxOutput: p.MaxOutput,
-		Final: opts.Final, KillWork: killWork,
+		Final: opts.Final, KillWork: kill, SteerWork: p.SteerWork,
 		RefreshRequested: &forceNext,
 	}
 

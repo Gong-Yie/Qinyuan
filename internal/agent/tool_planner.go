@@ -277,6 +277,47 @@ func NewKillWorkTool() *Tool {
 	}
 }
 
+// NewSteerWorkTool 让 planner 对正在跑的 work 做**实时纠偏**（不杀进程、不丢进展）。
+//
+// 语义：消息进队列，worker 在**下一次工具调用之前**取走，并拦下那次调用，
+// 把消息当作工具结果交回模型。所以它是"下一步生效"，不是"立刻打断"。
+func NewSteerWorkTool() *Tool {
+	return &Tool{
+		Name: "steer_work",
+		Description: `对一条正在跑的意图做实时纠偏：消息会在它下一次工具调用**之前**送到，
+并拦下那次调用（模型能看到并改道）。不杀进程、不丢已经做到的进展。
+适用：方向对但打法不对（例如「别再试 union 了，改盲注」）、要它优先核实某个点、提醒约束。
+不适用：方向整个错了 —— 那用 kill_work。`,
+		Schema: toolSpecJSON(`{
+  "type": "object",
+  "properties": {
+    "intent_id": {"type": "integer"},
+    "message": {"type": "string", "description": "一句话纠偏指令，要具体"}
+  },
+  "required": ["intent_id", "message"]
+}`),
+		Handle: func(ctx context.Context, rc *Context, raw json.RawMessage) (Result, error) {
+			var in struct {
+				IntentID int64  `json:"intent_id"`
+				Message  string `json:"message"`
+			}
+			if err := json.Unmarshal(raw, &in); err != nil {
+				return Errorf("参数解析失败：%v", err), nil
+			}
+			if strings.TrimSpace(in.Message) == "" {
+				return Errorf("message 不能为空：纠偏要说清「改成什么」，而不是「注意一下」"), nil
+			}
+			if rc.SteerWork == nil || !rc.SteerWork(in.IntentID, in.Message) {
+				return Errorf("当前没有运行中的意图 #%d（可能已经结束）；结束了的意图请用 add_intent 重新派", in.IntentID), nil
+			}
+			return JSONResult(map[string]any{
+				"intent_id": in.IntentID, "steered": true,
+				"note": "消息会在该意图下一次工具调用前生效（并拦下那次调用）",
+			}), nil
+		},
+	}
+}
+
 // NewPlannerRegistry 是 planner 的工具面：读态势 + 产意图 + 判目标 + 跨 work 回看。
 // 注意它没有 http_request / insert_assets / record_fact —— 规划者不亲自干活。
 func NewPlannerRegistry() *Registry {
@@ -293,6 +334,7 @@ func NewPlannerRegistry() *Registry {
 		NewAddIntentTool(),
 		NewProveGoalTool(),
 		NewKillWorkTool(),
+		NewSteerWorkTool(),
 	)
 }
 
