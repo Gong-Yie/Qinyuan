@@ -473,6 +473,7 @@ func (e *Engine) plannerLoop(ctx context.Context, runID int64) {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
+	stallReplans, stallFallbacks := 0, 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -481,22 +482,114 @@ func (e *Engine) plannerLoop(ctx context.Context, runID int64) {
 			if !e.debounce(ctx, runID) {
 				return
 			}
-			if !e.planRound(ctx, runID, false) {
-				return
-			}
+			// 图变了（worker 结束 / 人工操作）：停摆计数重来。
+			stallReplans, stallFallbacks = 0, 0
 		case <-timer.C:
-			if !e.planRound(ctx, runID, false) {
-				return
-			}
 		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
+		if !e.planRound(ctx, runID, false) {
+			return
 		}
-		timer.Reset(interval)
+
+		// 停摆：目标未达成、却没有任何 open/running 意图。
+		//
+		// prompt 要求这种情况下必须产出意图，但模型仍可能产出 0（run #41 第 9 轮）：
+		// 旧实现会干等一个心跳（600s），10 分钟什么都不做。现在改成有界重规划：
+		// 立即重试几次 → 短周期巡检几次 → 才退回心跳，并留下 system 记录。
+		wait, nextReplans, nextFallbacks := nextStallWait(
+			e.isStalled(ctx, runID), stallReplans, stallFallbacks, interval)
+		if wait < 0 { // 状态变了：正常等心跳
+			stallReplans, stallFallbacks = nextReplans, nextFallbacks
+			wait = interval
+		} else {
+			switch {
+			case nextReplans > stallReplans:
+				e.emitStall(ctx, runID, "探索停摆（没有 open/running 意图）：立即重新规划",
+					map[string]any{"mode": "immediate", "attempt": nextReplans})
+			case nextFallbacks > stallFallbacks:
+				e.emitStall(ctx, runID,
+					fmt.Sprintf("停摆仍在继续：改为 %s 巡检（第 %d/%d 次）", wait, nextFallbacks, maxStallFallbacks),
+					map[string]any{"mode": "patrol", "attempt": nextFallbacks, "wait_seconds": int(wait.Seconds())})
+			case nextReplans == maxStallReplans && nextFallbacks == maxStallFallbacks:
+				e.emitStall(ctx, runID,
+					"停摆仍未恢复：退回心跳巡检 —— 连续 0 意图，说明需要人工介入或改 prompt",
+					map[string]any{"mode": "heartbeat", "heartbeat_seconds": int(interval.Seconds())})
+			}
+			stallReplans, stallFallbacks = nextReplans, nextFallbacks
+		}
+		resetTimer(timer, wait)
 	}
+}
+
+// 停摆策略参数（docs/21）。
+//
+// 注意 maxStallReplans 是"连续"次数：任何一次产出意图、来了 notify、或图变了都会归零，
+// 所以正常任务不会因为偶尔一轮 0 意图就多花钱。
+const (
+	maxStallReplans     = 2
+	maxStallFallbacks   = 3
+	stallReplanBackoff  = 800 * time.Millisecond
+	stallPatrolInterval = 2 * time.Minute
+)
+
+// nextStallWait 决定"这一轮之后等多久、计数怎么走"。
+//
+// 返回值 wait < 0 表示"没有停摆"（调用方用正常心跳间隔）。
+// 抽成纯函数是为了能单测（不需要起 DB/引擎）。
+func nextStallWait(stalled bool, replans, fallbacks int, interval time.Duration) (wait time.Duration, nextReplans, nextFallbacks int) {
+	if !stalled {
+		return -1, 0, 0
+	}
+	if replans < maxStallReplans {
+		return stallReplanBackoff, replans + 1, fallbacks
+	}
+	if fallbacks < maxStallFallbacks {
+		patrol := stallPatrolInterval
+		if patrol > interval {
+			patrol = interval
+		}
+		return patrol, replans, fallbacks + 1
+	}
+	return interval, replans, fallbacks
+}
+
+// isStalled 判断"目标未达成 + 没有任何 open/running 意图"这个死锁状态。
+// 暂停/排队/终态、或目标已全部达成，都不算停摆。
+func (e *Engine) isStalled(ctx context.Context, runID int64) bool {
+	run, err := e.Store.Run(ctx, runID)
+	if err != nil || run.Task == nil {
+		return false
+	}
+	if model.IsTerminalTaskState(run.Task.Status) || run.Task.Paused || run.Task.Queued {
+		return false
+	}
+	open, err := e.Store.HasOpenGoal(ctx, runID)
+	if err != nil || !open {
+		return false
+	}
+	active, err := e.Store.HasActiveIntent(ctx, runID)
+	if err != nil {
+		return false
+	}
+	return !active
+}
+
+func (e *Engine) emitStall(ctx context.Context, runID int64, summary string, meta map[string]any) {
+	e.emit(context.WithoutCancel(ctx), &model.Activity{
+		RunID: runID, Worker: "system", Kind: model.ActSystem,
+		Summary: summary, Metadata: meta,
+	})
+	e.Log.Warn("[planner] "+summary, "run", runID)
+}
+
+// resetTimer 重置定时器（先停再清空已触发的通道，避免旧 tick 抢跑）。
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
 }
 
 func (e *Engine) heartbeatInterval(ctx context.Context, runID int64) time.Duration {
