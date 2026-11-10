@@ -19,6 +19,7 @@ type Stats struct {
 	InputTokens int64 `json:"input_tokens"`
 	CacheRead   int64 `json:"cache_read_tokens"`
 	Output      int64 `json:"output_tokens"`
+	Pending     int   `json:"pending_approvals"`
 }
 
 // Stats 汇总首页指标。
@@ -55,6 +56,10 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 		SELECT COALESCE(sum(input_tokens),0), COALESCE(sum(cache_read_tokens),0), COALESCE(sum(output_tokens),0)
 		  FROM activity WHERE kind='result'`).
 		Scan(&st.InputTokens, &st.CacheRead, &st.Output); err != nil {
+		return nil, err
+	}
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM intercept_pending WHERE status='pending'`).Scan(&st.Pending); err != nil {
 		return nil, err
 	}
 	return &st, nil

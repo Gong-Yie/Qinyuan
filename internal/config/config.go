@@ -51,6 +51,11 @@ type Config struct {
 	SettlementTimeout time.Duration
 	MaxConcurrentRuns int // 同时跑的任务上限（0 = 不限）
 
+	// M6a：审批门。
+	ApprovalTimeout   time.Duration // 等人审批的上限
+	ApprovalOnTimeout string        // deny（默认）| allow
+	ApprovalDisabled  bool          // true = 完全关闭审批门（默认 false）
+
 	LLM LLMConfig
 }
 
@@ -106,6 +111,8 @@ func Load() (*Config, error) {
 		ContextWindowK:    200,
 		SettlementTurns:   3,
 		SettlementTimeout: 2 * time.Minute,
+		ApprovalTimeout:   5 * time.Minute,
+		ApprovalOnTimeout: "deny",
 		LLM: LLMConfig{
 			Provider:    "fake",
 			BaseURL:     "https://api.openai.com/v1",
@@ -195,6 +202,24 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_MAX_CONCURRENT_RUNS 非法：%q（0=不限，1..100）", v)
 		}
 		c.MaxConcurrentRuns = n
+	}
+	if v, _ := pick("QINYUAN_APPROVAL_TIMEOUT_SECONDS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 10 || n > 3600 {
+			return nil, fmt.Errorf("QINYUAN_APPROVAL_TIMEOUT_SECONDS 非法：%q（10..3600）", v)
+		}
+		c.ApprovalTimeout = time.Duration(n) * time.Second
+	}
+	if v, _ := pick("QINYUAN_APPROVAL_ON_TIMEOUT", fileVals, ""); v != "" {
+		switch v {
+		case "deny", "allow":
+			c.ApprovalOnTimeout = v
+		default:
+			return nil, fmt.Errorf("QINYUAN_APPROVAL_ON_TIMEOUT 非法：%q（deny|allow）", v)
+		}
+	}
+	if v, _ := pick("QINYUAN_APPROVAL_DISABLE", fileVals, ""); v == "1" {
+		c.ApprovalDisabled = true
 	}
 
 	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)

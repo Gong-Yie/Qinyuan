@@ -132,6 +132,7 @@ async function pollGlobal() {
     $('badge-runs').textContent = st.running ? String(st.running) : '';
     $('badge-findings').textContent = st.findings ? String(st.findings) : '';
     $('badge-assets').textContent = st.entities ? String(st.entities) : '';
+    $('badge-approvals').textContent = st.pending_approvals ? String(st.pending_approvals) : '';
   } catch (e) {
     $('health-dot').className = 'dot is-bad';
     $('health-text').textContent = '后端不可用';
@@ -149,6 +150,7 @@ function parseHash() {
   if (seg[0] === 'runs') return { name: 'runs' };
   if (seg[0] === 'findings') return { name: 'findings' };
   if (seg[0] === 'assets') return { name: 'assets' };
+  if (seg[0] === 'approvals') return { name: 'approvals' };
   if (seg[0] === 'settings') return { name: 'settings' };
   return { name: 'dashboard' };
 }
@@ -166,6 +168,7 @@ async function route() {
       case 'run': await renderRun(); break;
       case 'findings': await renderFindings(); break;
       case 'assets': await renderAssets(); break;
+      case 'approvals': await renderApprovals(); break;
       case 'settings': await renderSettings(); break;
       default: await renderDashboard();
     }
@@ -887,6 +890,104 @@ function drawAssets() {
       }).join('')}</tbody>
     </table>` : empty('还没有资产', 'worker 用 insert_assets 登记；去重由数据库唯一索引保证。')}
   </div>`;
+}
+
+/* ── 审批 ────────────────────────────────────────────── */
+
+async function renderApprovals() {
+  setPage('审批', '规则命中后挂起的人工确认');
+  const [pending, all, rules] = await Promise.all([
+    api('/api/approvals?status=pending'),
+    api('/api/approvals?limit=50'),
+    api('/api/intercept/rules'),
+  ]);
+  const history = (all.items || []).filter((x) => x.status !== 'pending');
+
+  $('view').innerHTML = `
+    <div class="stack">
+      <div class="card">
+        <div class="card-head">
+          <h2 class="card-title">待处理<small>${(pending.items || []).length}</small></h2>
+          <span class="muted">工具调用会一直阻塞，直到你决定或超时</span>
+        </div>
+        ${(pending.items || []).length ? (pending.items || []).map((p) => `
+          <div class="row-item">
+            <span class="state-dot running"></span>
+            <div class="row-main">
+              <div class="row-title"><b class="mono">#${p.id}</b> · <span class="mono">${esc(p.tool)}</span>
+                <span class="muted">（任务 #${p.run_id}${p.intent_id ? ' · 意图 #' + p.intent_id : ''}）</span></div>
+              <div class="row-meta"><span>${esc(p.reason)}</span><span>${fmtDate(p.created_at)}</span></div>
+              <pre class="approval-code">${esc(p.tool_input || '{}')}</pre>
+            </div>
+            <div class="row-side">
+              <button class="btn btn-primary btn-sm" data-approve="${p.id}">批准</button>
+              <button class="btn btn-danger btn-sm" data-deny="${p.id}">拒绝</button>
+            </div>
+          </div>`).join('') : empty('没有待处理的审批', '规则命中 <b>ask</b> 时工具调用会挂在这里等人工确认。')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">审批记录</h2></div>
+        ${history.length ? `<table class="table">
+          <thead><tr><th>#</th><th>工具</th><th>结果</th><th>处理人</th><th>时间</th><th>原因</th></tr></thead>
+          <tbody>${history.map((p) => `<tr>
+            <td class="mono">#${p.id}</td>
+            <td class="mono">${esc(p.tool)}</td>
+            <td>${p.status === 'allowed' ? '<span class="badge badge-done">已批准</span>'
+              : p.status === 'denied' ? '<span class="badge badge-failed">已拒绝</span>'
+              : '<span class="badge badge-paused">超时</span>'}</td>
+            <td class="muted">${esc(p.decided_by || '—')}</td>
+            <td class="muted">${p.decided_at ? fmtDate(p.decided_at) : '—'}</td>
+            <td class="muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.reason)}</td>
+          </tr>`).join('')}</tbody>
+        </table>` : empty('还没有审批记录')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2 class="card-title">审批规则<small>${(rules.items || []).length}</small></h2>
+          <span class="muted">deny 永远优先；其余按 priority 降序取第一条</span></div>
+        <table class="table">
+          <thead><tr><th class="num">优先级</th><th>工具</th><th>参数正则</th><th>决定</th><th>说明</th></tr></thead>
+          <tbody>${(rules.items || []).map((r) => `<tr>
+            <td class="num">${r.priority}</td>
+            <td class="mono">${esc(r.match_tool || '（任意）')}</td>
+            <td class="mono muted">${esc(r.match_regex || '（任意）')}</td>
+            <td>${r.decision === 'allow' ? '<span class="badge badge-done">放行</span>'
+              : r.decision === 'deny' ? '<span class="badge badge-failed">禁止</span>'
+              : '<span class="badge badge-paused">审批</span>'}</td>
+            <td class="muted">${esc(r.note)}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+
+  document.querySelectorAll('[data-approve]').forEach((b) => {
+    b.addEventListener('click', () => decideApproval(Number(b.dataset.approve), 'allowed', ''));
+  });
+  document.querySelectorAll('[data-deny]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const reason = window.prompt('拒绝原因（会写进记录，并作为工具结果交回模型）：', '不符合授权范围');
+      if (reason === null) return;
+      decideApproval(Number(b.dataset.deny), 'denied', reason);
+    });
+  });
+
+  S.refresh = async () => { if (S.route && S.route.name === 'approvals') await renderApprovals(); };
+}
+
+async function decideApproval(id, decision, reason) {
+  try {
+    await api(`/api/approvals/${id}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, reason }),
+    });
+    toast(decision === 'allowed' ? `已批准 #${id}` : `已拒绝 #${id}`);
+    await pollGlobal();
+    await renderApprovals();
+  } catch (e) {
+    toast('处理失败：' + e.message);
+  }
 }
 
 async function renderSettings() {

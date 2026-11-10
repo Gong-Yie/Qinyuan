@@ -56,6 +56,11 @@ type Config struct {
 	// M4b：并发准入与删除。
 	MaxConcurrentRuns  int           // 同时跑的任务上限（0 = 不限，保持旧行为）
 	DeleteDrainTimeout time.Duration // 删除时等循环退出/在跑操作静默的上限（默认 10s）
+
+	// M6a：审批门。
+	ApprovalTimeout   time.Duration // 等人审批的上限（默认 5 分钟）
+	ApprovalOnTimeout string        // 超时动作：deny（默认）| allow
+	ApprovalDisabled  bool          // 显式关闭审批门（默认 false = 开启，规则默认放行）
 }
 
 type runRuntime struct {
@@ -76,6 +81,7 @@ type Engine struct {
 	planner         *agent.Planner
 	plannerMaxTurns int
 	goals           *agent.GoalDecomposer
+	gate            *agent.Gate
 
 	mu          sync.Mutex
 	paused      map[int64]bool
@@ -164,6 +170,11 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 	// planner 的两只手（kill / steer）只能在引擎里实现：它们要摸到 work 的 ctx 与队列。
 	e.planner.KillWork = e.KillWork
 	e.planner.SteerWork = e.SteerWork
+	if !cfg.ApprovalDisabled {
+		e.gate = &agent.Gate{
+			Store: st, Timeout: cfg.ApprovalTimeout, OnTimeout: cfg.ApprovalOnTimeout,
+		}
+	}
 	return e
 }
 
@@ -178,6 +189,7 @@ func (e *Engine) worker() *agent.Worker {
 			Timeout:  e.Cfg.SettlementTimeout,
 		},
 		Compaction: agent.CompactionConfig{WindowTokens: e.Cfg.ContextWindowTokens},
+		Gate:       e.gate,
 	}
 	return w
 }

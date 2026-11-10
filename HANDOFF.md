@@ -43,11 +43,13 @@
 | M4c | 流式输出（SSE）+ committed 边界（未提交才可重试） | ✅ |
 | M5a | activity SSE + 仪表盘（手写 SPA + `go:embed`，IA 按 ARTEX；**不含链路图**，见 `docs/11 §6`） | ✅ |
 | M5b | 链路图（自写分层布局）+ 覆盖图（同心圆 + 折叠） | ✅ |
-| M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
+| M6a | 审批门（规则 → 人工挂起；默认只对 DELETE/PUT/PATCH 要审批） | ✅ |
+| M6b | 流量录制（MITM 代理 + 证据绑定） | ❌ 未做 |
+| M6c | finding 复测 + 报告 | ❌ 未做 |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
-> 会话走任务级 SSE（`/api/runs/{id}/activity/stream`）。链路图与覆盖图还没做。
+> 会话走任务级 SSE（`/api/runs/{id}/activity/stream`）；审批在「审批」页（侧边栏带 pending 红点）。
 
 ---
 
@@ -199,7 +201,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。98 个测试。
+生产 Go ≈ 10.4k 行、测试 ≈ 3.5k 行、schema ≈ 330 行。105 个测试。
 
 ---
 
@@ -543,7 +545,7 @@ type Factory interface  { For(sessionKey string) Provider }
 
 ---
 
-## 10. 测试（98 个，`*_test.go`）
+## 10. 测试（105 个，`*_test.go`）
 
 ### 10.1 基础设施
 
@@ -786,13 +788,20 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     进度条/柱状图的 track 与 fill 都要显式 `display:block`。
 43. **`health.llm_configured` 别再硬编码**：曾经写死 `false`，设置页永远显示"模型未配置"。
     现在按 provider 类型判断（`*llm.FakeFactory` = 未配置）。
+44. **审批规则要匹配"实际会执行什么"**：模型常省略 `method`（工具默认 GET），
+    规则若只看原始入参，"GET 需要审批"永远不命中。`normalizeToolInput` 先补默认值再匹配。
+45. **`CreateInterceptRule` 的 `Enabled` 默认是 false**：写测试/脚本时忘记显式置 true，
+    规则会被静默跳过（`WHERE enabled` 过滤）。加规则时一律显式给。
+46. **`intercept_pending` 没有启动清扫**：崩溃/重启后残留 `pending` 行永远是 pending，
+    UI 上还能点批准但已经没人在等（与 ARTEX 同一缺口）。恢复时需要一次性 `timeout`。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
-<待提交> M5b：链路图 + 覆盖图（自写 SVG 布局）+ 仪表盘重做（按 ARTEX 的 IA，docs/11）
+<待提交> M6a：审批门（规则 → 人工挂起，docs/12）
+138aa6d M5b：链路图 + 覆盖图（自写 SVG 布局）
 3525172 控制台重做：按 ARTEX 的仪表盘信息架构
 5963694 M5a：activity SSE + 控制台（手写 SPA + go:embed）
 30fcc50 P4 观测：每节点用量 + /api/runs/{id}/tokens（docs/10）
@@ -812,18 +821,19 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-P0–P4、M5a 与仪表盘重做已提交（`566e2c6`、`f51beba`、`30fcc50`、`5963694`、`32c4d23`、`3525172`）。
-**当前工作区未提交的是 M5b（链路图 + 覆盖图）**：
-`internal/server/webui/{graph.js,app.js,index.html,styles.css}` +
-`internal/server/{graph_api.go,server.go}` + `internal/store/{graphview.go,graphview_test.go,coverage.go}` +
-`docs/11`、`docs/screenshots/m5-graph.png`、`m5-coverage-graph.png`。
+P0–P4、M5a、M5b 已提交（`566e2c6`…`138aa6d`）。
+**当前工作区未提交的是 M6a（审批门）**：
+`internal/store/{schema.sql,intercept.go,intercept_test.go,stats.go}` +
+`internal/agent/{gate.go,gate_test.go,worker.go}` + `internal/engine/engine.go` +
+`internal/server/{approvals.go,server.go}` + `internal/config/config.go` + `cmd/qinyuan/main.go` +
+`internal/server/webui/{index.html,app.js,styles.css}` + `docs/12`、`docs/screenshots/m6-*.png`。
 
-`docs/00–11` 是设计与验收记录；本文是状态快照。
+`docs/00–12` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 98 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 105 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

@@ -360,3 +360,50 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS seeds TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE INDEX IF NOT EXISTS idx_nodes_rev ON nodes(run_id, rev);
 CREATE INDEX IF NOT EXISTS idx_edges_rev ON edges(run_id, rev);
+
+-- ---------------------------------------------------------------------------
+-- M6a：审批门（规则 → 可选判官 → 人工挂起）
+--
+-- 设计取舍：规则进 DB（可停用可审计），默认策略显式存在（catch-all allow），
+-- 于是"为什么放行"永远能回答；破坏性 HTTP 方法默认 ask，不打断正常探测。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS intercept_rules (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      BIGINT REFERENCES runs(id) ON DELETE CASCADE,   -- 空 = 全局
+    priority    INT NOT NULL DEFAULT 100,
+    match_tool  TEXT NOT NULL DEFAULT '',                        -- 空 = 任意工具
+    match_regex TEXT NOT NULL DEFAULT '',                        -- 空 = 任意参数
+    decision    TEXT NOT NULL CHECK (decision IN ('allow','deny','ask')),
+    note        TEXT NOT NULL DEFAULT '',
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_intercept_rules_lookup
+    ON intercept_rules(priority DESC, id DESC) WHERE enabled;
+
+CREATE TABLE IF NOT EXISTS intercept_pending (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    intent_id   BIGINT,
+    tool        TEXT NOT NULL,
+    tool_use_id TEXT NOT NULL DEFAULT '',
+    tool_input  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    rule_id     BIGINT,
+    reason      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','allowed','denied','timeout')),
+    decided_by  TEXT NOT NULL DEFAULT '',
+    decided_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_intercept_pending_status ON intercept_pending(status, id DESC);
+
+-- 默认规则（只在表为空时种）：catch-all allow 放在最低优先级，保证"每条放行都有规则可归因"。
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM intercept_rules) THEN
+    INSERT INTO intercept_rules (priority, match_tool, match_regex, decision, note) VALUES
+      (100, 'http_request', '(?i)"method"\s*:\s*"DELETE"', 'ask', 'DELETE 是破坏性请求：需要人工审批'),
+      (90,  'http_request', '(?i)"method"\s*:\s*"(PUT|PATCH)"', 'ask', 'PUT/PATCH 会改数据：需要人工审批'),
+      (0,   '', '', 'allow', '默认策略：放行（显式存在，便于审计"为什么放行"）');
+  END IF;
+END $$;

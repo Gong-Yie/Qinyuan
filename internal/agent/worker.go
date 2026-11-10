@@ -61,6 +61,8 @@ type Worker struct {
 	// Steer 由编排层注入：每次工具调用前问一次"有没有实时纠偏"。
 	// 返回非空消息时，**本次工具调用不执行**，把消息作为工具结果交给模型。
 	Steer func() (string, bool)
+	// Gate 是审批门（规则 → 人工）；nil = 不启用。
+	Gate *Gate
 }
 
 // Execute 跑一条已领取（state=running）的意图。
@@ -261,6 +263,35 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 						Summary:  model.TrimSummary(oneLine(res.Text), 200),
 						Detail:   clampOutput(rc, "tool_output", res.Text),
 						Metadata: map[string]any{"tool_call_id": tc.ID, "steer": true},
+					})
+					msgs = append(msgs, llm.Message{
+						Role: llm.RoleTool, ToolCallID: tc.ID, Name: tc.Name,
+						Text: res.Text, IsError: true,
+					})
+					continue
+				}
+			}
+
+			// 审批门：在真正执行**之前**判定。被拦下时把拒绝文案当工具结果交回模型，
+			// 让模型自己改道，而不是让整条意图 failed。
+			if w.Gate != nil {
+				allowed, refuse := w.Gate.Check(execCtx, runID, intentID, tc.Name, tc.ID, tc.Input,
+					func(p *store.PendingApproval) {
+						emit(execCtx, &model.Activity{
+							RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+							Summary:  fmt.Sprintf("等待人工审批：%s（审批 #%d）", tc.Name, p.ID),
+							Detail:   p.Reason + "\n参数：" + string(tc.Input),
+							Metadata: map[string]any{"approval_id": p.ID, "tool_call_id": tc.ID},
+						})
+					})
+				if !allowed {
+					res := Errorf("%s", refuse)
+					emit(execCtx, &model.Activity{
+						RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActToolResult,
+						Tool: tc.Name, ToolUseID: tc.ID, IsError: true,
+						Summary:  model.TrimSummary(oneLine(res.Text), 200),
+						Detail:   clampOutput(rc, "tool_output", res.Text),
+						Metadata: map[string]any{"tool_call_id": tc.ID, "blocked_by": "intercept"},
 					})
 					msgs = append(msgs, llm.Message{
 						Role: llm.RoleTool, ToolCallID: tc.ID, Name: tc.Name,
