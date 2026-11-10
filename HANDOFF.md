@@ -777,6 +777,7 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 pwsh -File scripts/go.ps1 test ./... -count=1     # 68 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
+pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）
 ```
 
 ---

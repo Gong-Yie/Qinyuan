@@ -99,9 +99,20 @@ go test ./internal/store/ -run TestClaimConcurrentNoDuplicates -count=20   # 并
 
 > 竞态检测：`pwsh -File scripts/race.ps1`（64 位 Go + mingw-w64；当前全量 `-race` 已通过，无数据竞争）。
 
+### 6. 看 M4 的实际效果（不用真实模型）
+
+```powershell
+pwsh -File scripts/demo/demo-m4.ps1
+```
+
+它起一个本地"假 OpenAI 流式网关"（`scripts/demo/fakegw.go`），让 `serve` 走**真实适配器**，
+然后现场演示：MaxTurns=1 → 主循环写一条事实 → **收尾轮**再写一条；并发上限=1 时第二个任务
+**排队**；删除第一个任务后第二个**自动补位**；每轮都能看到 **TTFT（首字延迟）**。
+演示用独立 schema（`m4demo`），跑完自动删除，不碰开发库。
+
 ---
 
-## HTTP API（M1）
+## HTTP API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

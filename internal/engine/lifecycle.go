@@ -307,6 +307,9 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		if err := e.Store.DequeueRun(ctx, runID); err != nil {
 			return
 		}
+		// 与 admit 保持一致：占坑是 DB 事实（created → running）。
+		_, _ = e.Store.CASRunTaskStatus(ctx, runID,
+			[]string{model.TaskCreated, "queued"}, model.TaskRunning)
 		if err := e.Run(ctx, runID); err != nil {
 			e.Log.Error("[admit] 出队启动失败", "run", runID, "err", err)
 			continue
