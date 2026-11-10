@@ -86,6 +86,40 @@
 
 <div id="toast" class="toast" hidden></div>
 
+<!-- 新建任务抽屉：放在 #view 之外，页面每 5s 重渲染也不会动它（输入不会被打断） -->
+<div id="new-task" class="drawer" hidden>
+  <div class="drawer-head">
+    <strong>新建任务</strong>
+    <button class="btn btn-ghost" id="new-task-close" type="button">关闭</button>
+  </div>
+  <div class="drawer-form">
+    <label>目标（必填）
+      <textarea id="nt-goal" class="search" rows="3" placeholder="例如：在 Acme Notes 站点找到 flag，并给出可复现的请求链与证据"></textarea>
+    </label>
+    <label>授权目标（URL / IP:端口 / 域名 / CIDR）
+      <input id="nt-target" class="search" placeholder="http://127.0.0.1:8080/ 或 10.0.0.5 或 example.com" />
+    </label>
+    <div class="form-row">
+      <label style="flex:0 0 120px">worker 数
+        <input id="nt-workers" class="search" type="number" min="1" max="8" value="2" />
+      </label>
+      <label style="flex:0 0 170px">超时（秒，0=不限）
+        <input id="nt-timeout" class="search" type="number" min="0" placeholder="480" />
+      </label>
+    </div>
+    <label>任务名（可选）
+      <input id="nt-name" class="search" placeholder="CTF-AcmeNotes" />
+    </label>
+    <p class="muted" style="font-size:12px;margin:2px 0 0">
+      目标会按“最小范围”登记授权。打本机靶场需要 serve 带 <code>QINYUAN_ALLOW_LOOPBACK=1</code>。
+    </p>
+    <div class="form-row" style="margin-top:4px">
+      <button class="btn btn-primary" id="nt-create" type="button">创建并启动</button>
+      <button class="btn btn-ghost" id="nt-cancel" type="button">取消</button>
+    </div>
+  </div>
+</div>
+
 <div id="login" class="login-mask" hidden>
   <div class="login-card">
     <div class="login-brand">钦原 · 控制台</div>

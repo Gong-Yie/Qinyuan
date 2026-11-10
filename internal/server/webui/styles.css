@@ -500,3 +500,8 @@ select.search { min-width: 140px; }
 .login-hint { margin: 0; font-size: 12.5px; color: var(--muted); }
 .login-card .search { min-width: 0; width: 100%; }
 .login-err { font-size: 12.5px; color: var(--danger); }
+/* ── M11：新建任务抽屉（表单在 #view 之外，轮询重渲染不会清空输入） ── */
+.drawer-form { padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow: auto; flex: 1; }
+.drawer-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.drawer-form .search { width: 100%; min-width: 0; box-sizing: border-box; }
+.drawer-form textarea.search { resize: vertical; line-height: 1.5; font-family: inherit; }

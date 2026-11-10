@@ -391,6 +391,11 @@ function drawRuns() {
     return true;
   });
 
+  // 结构签名：数据没变就不重渲染 —— 5s 轮询不会打断搜索框输入，也不会闪。
+  const sig = JSON.stringify([st, q, items.map((r) => [r.id, r.status, r.round, (r.intents || []).length, r.updated_at])]);
+  if (S.runsSig === sig && $('runs-table')) return;
+  S.runsSig = sig;
+
   $('view').innerHTML = `
     <div class="toolbar">
       <div class="seg" id="status-seg">
@@ -400,23 +405,10 @@ function drawRuns() {
       <input class="search" id="run-search" placeholder="搜索目标…" value="${esc(S.search)}" />
       <span class="spacer"></span>
       <span class="muted">${items.length} / ${S.runs.length} 个任务</span>
+      <button class="btn btn-primary" id="new-task-open">+ 新建任务</button>
       <button class="btn" id="run-refresh">刷新</button>
     </div>
-    <div class="card">
-      <div class="card-head"><h2 class="card-title">新建任务</h2>
-        <span class="muted">目标会按"最小范围"登记授权（URL / IP:端口 / 域名 / CIDR）；留空 = 只有目标文本</span></div>
-      <div class="card-body">
-        <div class="form-row">
-          <input class="search" id="new-goal" placeholder="目标（必填）：如 拿下 /flag；或 确认登录页是否有 SQL 注入" style="min-width:420px" />
-          <input class="search" id="new-target" placeholder="授权目标：http://靶机:8080/ 或 10.0.0.5 或 example.com" style="min-width:300px" />
-          <input class="search" id="new-workers" type="number" min="1" max="8" value="2" title="worker 数" style="min-width:80px" />
-          <input class="search" id="new-timeout" type="number" min="0" placeholder="超时秒(0=不限)" style="min-width:130px" />
-          <input class="search" id="new-name" placeholder="任务名（可选）" style="min-width:150px" />
-          <button class="btn btn-primary" id="new-create">创建并启动</button>
-        </div>
-      </div>
-    </div>
-    <div class="card">
+    <div class="card" id="runs-table">
       ${items.length ? `<table class="table">
         <thead><tr>
           <th>状态</th><th>目标</th><th class="num">轮次</th><th class="num">意图</th>
@@ -435,12 +427,18 @@ function drawRuns() {
   });
   $('run-search').addEventListener('input', (e) => {
     S.search = e.target.value;
+    const caret = e.target.selectionStart;
     clearTimeout(drawRuns._t);
-    drawRuns._t = setTimeout(drawRuns, 180);
+    drawRuns._t = setTimeout(() => {
+      drawRuns();
+      // 重渲染会把 <input> 换掉：把焦点与光标放回去，否则打字打到一半就断。
+      const el = $('run-search');
+      if (el) { el.focus(); try { el.setSelectionRange(caret, caret); } catch { /* 忽略 */ } }
+    }, 180);
   });
   $('run-refresh').addEventListener('click', () => S.refresh && S.refresh());
-  const createBtn = $('new-create');
-  if (createBtn) createBtn.addEventListener('click', createRun);
+  const newBtn = $('new-task-open');
+  if (newBtn) newBtn.addEventListener('click', openNewTask);
 
   document.querySelectorAll('[data-run]').forEach((row) => {
     row.addEventListener('click', (ev) => {
@@ -498,21 +496,37 @@ async function control(id, action) {
   } catch (e) { toast('操作失败：' + e.message); }
 }
 
-// 新建任务：创建 + 启动（两步都要，否则任务只是躺在 created 状态）。
+// 新建任务抽屉：表单在 #view 之外，页面轮询重渲染不会清空输入。
+function openNewTask() {
+  const d = $('new-task');
+  if (!d) return;
+  d.hidden = false;
+  setTimeout(() => { const g = $('nt-goal'); if (g) g.focus(); }, 30);
+}
+
+function closeNewTask() {
+  const d = $('new-task');
+  if (d) d.hidden = true;
+}
+
+// 创建 + 启动（两步都要，否则任务只是躺在 created 状态）。
 async function createRun() {
-  const goal = $('new-goal').value.trim();
-  if (!goal) { toast('先写目标（goal 必填）'); return; }
+  const goal = $('nt-goal').value.trim();
+  if (!goal) { toast('先写目标（goal 必填）'); $('nt-goal').focus(); return; }
   const body = {
     goal,
-    target: $('new-target').value.trim(),
-    name: $('new-name').value.trim(),
-    worker_count: Number($('new-workers').value) || 2,
-    timeout_seconds: Number($('new-timeout').value) || 0,
+    target: $('nt-target').value.trim(),
+    name: $('nt-name').value.trim(),
+    worker_count: Number($('nt-workers').value) || 2,
+    timeout_seconds: Number($('nt-timeout').value) || 0,
   };
   try {
     const run = await api('/api/runs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
+    closeNewTask();
+    // 清空输入，下次打开是干净的（但只在成功后才清）。
+    ['nt-goal', 'nt-target', 'nt-name', 'nt-timeout'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
     try {
       await api(`/api/runs/${run.id}/control`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"action":"start"}',
@@ -1766,7 +1780,12 @@ function esc(s) {
   });
   $('btn-refresh').addEventListener('click', () => { if (S.refresh) S.refresh(); route(); });
   $('drawer-close').addEventListener('click', () => { $('drawer').hidden = true; });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('drawer').hidden = true; });
+  $('new-task-close').addEventListener('click', closeNewTask);
+  $('nt-cancel').addEventListener('click', closeNewTask);
+  $('nt-create').addEventListener('click', createRun);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { $('drawer').hidden = true; closeNewTask(); }
+  });
   $('view').addEventListener('scroll', () => {
     const v = $('view');
     S.stickBottom = v.scrollHeight - v.scrollTop - v.clientHeight < 120;
@@ -1783,6 +1802,9 @@ function esc(s) {
 
   setInterval(() => {
     if (!S.authed) return;
+    // 正在输入时不要重渲染（任何页面的表单都不该被 5s 轮询清空）。
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
     pollGlobal();
     if (S.refresh) S.refresh();
   }, 5000);
