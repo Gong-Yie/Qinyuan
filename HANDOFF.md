@@ -827,7 +827,8 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 ## 15. 当前交付物与 git 状态
 
 ```
-<待提交> M6c：finding 复测 + Markdown 报告（docs/14）
+7e7b08c M7：平台化七件套（trace/outbox/GraphStore/战役/审批SLA/报告/连接器，docs/15）
+62e5a5f M6c：finding 复测 + Markdown 报告（docs/14）
 ad9ba16 M6b：流量录制（工具层录制 + PG 索引）
 a5662fd M6a：审批门（规则 → 人工挂起）
 138aa6d M5b：链路图 + 覆盖图（自写 SVG 布局）
