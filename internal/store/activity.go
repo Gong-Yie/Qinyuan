@@ -114,6 +114,59 @@ func (s *Store) TokenTotals(ctx context.Context, runID int64) (model.TokenUsage,
 	return u, err
 }
 
+// NodeUsage 是一个节点（通常是一条意图）的用量。
+//
+// 「哪个意图贵」只能从 kind='result' 的权威行算：usage 帧是流式累计值，SUM 全表会重复计数。
+type NodeUsage struct {
+	NodeID      int64  `json:"node_id"`
+	Kind        string `json:"kind,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+	Calls       int    `json:"calls"`
+	Input       int64  `json:"input_tokens"`
+	Output      int64  `json:"output_tokens"`
+	CacheRead   int64  `json:"cache_read_tokens"`
+	CacheWrite  int64  `json:"cache_write_tokens"`
+	EffectiveIn int64  `json:"effective_input_tokens"` // input - cache_read：更像"真正新读进去的"
+}
+
+// UsageByNode 按节点聚合用量，按"有效输入"降序（先看最贵的）。
+//
+// node_id=0 的行是 planner/goals 这类"任务级"调用（它们没有挂到某个意图上）。
+func (s *Store) UsageByNode(ctx context.Context, runID int64) ([]NodeUsage, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT COALESCE(a.node_id,0),
+		       COALESCE(n.kind,''),
+		       COALESCE(left(n.payload->>'summary', 60), ''),
+		       count(*),
+		       COALESCE(sum(a.input_tokens),0), COALESCE(sum(a.output_tokens),0),
+		       COALESCE(sum(a.cache_read_tokens),0), COALESCE(sum(a.cache_write_tokens),0)
+		  FROM activity a
+		  LEFT JOIN nodes n ON n.run_id = a.run_id AND n.id = a.node_id
+		 WHERE a.run_id=$1 AND a.kind='result'
+		 GROUP BY 1,2,3
+		 ORDER BY GREATEST(COALESCE(sum(a.input_tokens),0) - COALESCE(sum(a.cache_read_tokens),0), 0) DESC`,
+		runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []NodeUsage
+	for rows.Next() {
+		var u NodeUsage
+		if err := rows.Scan(&u.NodeID, &u.Kind, &u.Summary, &u.Calls,
+			&u.Input, &u.Output, &u.CacheRead, &u.CacheWrite); err != nil {
+			return nil, err
+		}
+		u.EffectiveIn = u.Input - u.CacheRead
+		if u.EffectiveIn < 0 {
+			u.EffectiveIn = 0
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // LastIntentOutput 取一条意图最后一条 assistant 正文（planner 判断"它到底做出了什么"）。
 func (s *Store) LastIntentOutput(ctx context.Context, runID, intentID int64) (string, error) {
 	var out string

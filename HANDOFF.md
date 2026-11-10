@@ -766,14 +766,19 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     越界值夹边界而不是报错 —— 预算是优化项，不该让一次执行直接失败。
 35. **http 响应体默认只回 4KB + 落盘指针**：200KB 的 HTML 按 `MaxOutput` 全额回会吃掉
     1/5 个窗口。要全文显式传 `full=true`，别把它做成默认。
+36. **看成本看"有效输入"（input − cache_read），不要看名义 input**：`run #24` 名义 107k、
+    有效只有 18.6k。按名义值做优化决策会去砍几乎免费的东西。
+37. **planner 空转轮先别退避**：两轮 0 意图名义成本 31k、有效只有 ~4k，而其中一轮顺带
+    `prove_goal` 收了工 —— 退避会让任务晚一个心跳（≥600s）结束。理由见 `docs/10`。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+f51beba P4：意图级预算 + http 两档返回（docs/09）
 566e2c6 修复：种子 URL（runs.seeds）+ 意图终态回收步骤 + 判据匹配重写 + confidence 边界（docs/07、08）
-<待提交> P4：意图级预算 + http 两档返回（docs/09）
+<待提交> P4 观测面：每节点用量 + /tokens 端点（docs/10）
 29e5f25 演示：M4 现场效果（假 OpenAI 流式网关 + 收尾轮/队列/删除/流式 TTFT）
 be7a1b5 M4c: 流式输出（SSE）+ committed 边界（未提交才可重试）+ TTFT 观测
 5c33ad1 M4b: 删除流水线（屏障→排水→两阶段）+ 并发准入队列（FIFO）+ 完整启动恢复
@@ -788,18 +793,17 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-P0–P3 已提交（`566e2c6`）。**当前工作区未提交的是 P4**（先 review 再提交）：
-`docs/09` + `internal/agent/{budget.go,worker.go,tool_http.go,tools.go,tool_planner.go,prompt.go}` +
-`internal/store/graph.go`（意图预算字段）+ 3 个测试文件（budget×2、http 两档×1）。
-三轮修复共新增 9 个测试文件。
+P0–P4 已提交（`566e2c6`、`f51beba`）。**当前工作区未提交的是 P4 的观测面**（先 review 再提交）：
+`docs/10` + `internal/store/{activity.go,usage_test.go}` + `internal/server/server.go`（`/tokens`）+
+`cmd/qinyuan/main.go`（每节点用量）。
 
 M4c 已提交（`be7a1b5`），工作区干净状态见 `git status`。
-`docs/00–09` 是设计与验收记录；本文是状态快照。
+`docs/00–10` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 89 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 90 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

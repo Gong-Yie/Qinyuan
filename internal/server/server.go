@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,6 +59,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/runs/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/runs/{id}/coverage", s.handleCoverage)
+	mux.HandleFunc("GET /api/runs/{id}/tokens", s.handleTokens)
 	mux.HandleFunc("POST /api/runs/{id}/work", s.handleWork)
 
 	return withMiddleware(mux, s.Log)
@@ -381,6 +383,64 @@ func (s *Server) handleWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"claimed": claimed})
+}
+
+// handleTokens 回答"这次任务的钱花在哪"：总量 + 每个节点（意图/任务级调用）的边际成本。
+//
+// 口径：只认 kind='result' 的权威行；effective_input = input - cache_read，
+// 因为前者含命中前缀缓存的部分，拿它算成本会高估。
+func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	tot, err := s.Store.TokenTotals(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	byNode, err := s.Store.UsageByNode(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var facts int
+	if err := s.Store.Pool().QueryRow(r.Context(),
+		`SELECT count(*) FROM nodes WHERE run_id=$1 AND kind='fact' AND state<>'origin'`, id).
+		Scan(&facts); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	effective := tot.Input - tot.CacheRead
+	if effective < 0 {
+		effective = 0
+	}
+	cachePct := 0.0
+	if tot.Input > 0 {
+		cachePct = float64(tot.CacheRead) * 100 / float64(tot.Input)
+	}
+	out := map[string]any{
+		"run_id":                 id,
+		"input_tokens":           tot.Input,
+		"output_tokens":          tot.Output,
+		"cache_read_tokens":      tot.CacheRead,
+		"cache_write_tokens":     tot.CacheWrite,
+		"effective_input_tokens": effective,
+		"cache_hit_pct":          math.Round(cachePct*10) / 10,
+		"facts":                  facts,
+		"effective_per_fact":     perFact(int64(effective), facts),
+		"nominal_per_fact":       perFact(int64(tot.Input), facts),
+		"by_node":                byNode,
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func perFact(tokens int64, facts int) int64 {
+	if facts <= 0 {
+		return 0
+	}
+	return tokens / int64(facts)
 }
 
 // runDTO 是列表/详情共用的 DTO：派生状态、计数、能力布尔都在这里算好，
