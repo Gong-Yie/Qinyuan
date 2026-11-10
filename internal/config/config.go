@@ -56,7 +56,30 @@ type Config struct {
 	ApprovalOnTimeout string        // deny（默认）| allow
 	ApprovalDisabled  bool          // true = 完全关闭审批门（默认 false）
 
+	// P3-4：按风险分级的等待与超时动作（低/中/高）。
+	// 语义：低风险等到点自动放行；中/高风险到点拒绝并留痕（夜间不卡死，也不放开闸门）。
+	ApprovalLowSeconds  int
+	ApprovalMidSeconds  int
+	ApprovalHighSeconds int
+	ApprovalLowAction   string
+	ApprovalMidAction   string
+	ApprovalHighAction  string
+
+	// P3-3：外部连接器（空 = 不启用，行为与升级前一致）。
+	Connectors ConnectorConfig
+
 	LLM LLMConfig
+}
+
+// ConnectorConfig 是双向集成的外部端点（工单 / 资产回写）。
+//
+// 刻意不做成"可插拔插件目录"：先支持"任意 HTTP 端点"这一种形态，
+// 客户用中间层适配自家系统；等真有第二家再做 SDK。
+type ConnectorConfig struct {
+	AssetsURL   string
+	AssetsToken string
+	TicketURL   string
+	TicketToken string
 }
 
 // LLMConfig 是模型接入配置。
@@ -113,6 +136,12 @@ func Load() (*Config, error) {
 		SettlementTimeout: 2 * time.Minute,
 		ApprovalTimeout:   5 * time.Minute,
 		ApprovalOnTimeout: "deny",
+		ApprovalLowSeconds:  60,
+		ApprovalMidSeconds:  300,
+		ApprovalHighSeconds: 900,
+		ApprovalLowAction:   "allow",
+		ApprovalMidAction:   "deny",
+		ApprovalHighAction:  "deny",
 		LLM: LLMConfig{
 			Provider:    "fake",
 			BaseURL:     "https://api.openai.com/v1",
@@ -221,8 +250,46 @@ func Load() (*Config, error) {
 	if v, _ := pick("QINYUAN_APPROVAL_DISABLE", fileVals, ""); v == "1" {
 		c.ApprovalDisabled = true
 	}
+	// 分级审批（P3-4）：秒数只能在 [5, 3600] 内，动作只认 allow/deny。
+	for _, tier := range []struct {
+		key  string
+		dst  *int
+		def  int
+	}{
+		{"QINYUAN_APPROVAL_LOW_SECONDS", &c.ApprovalLowSeconds, c.ApprovalLowSeconds},
+		{"QINYUAN_APPROVAL_MID_SECONDS", &c.ApprovalMidSeconds, c.ApprovalMidSeconds},
+		{"QINYUAN_APPROVAL_HIGH_SECONDS", &c.ApprovalHighSeconds, c.ApprovalHighSeconds},
+	} {
+		if v, _ := pick(tier.key, fileVals, ""); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 5 || n > 3600 {
+				return nil, fmt.Errorf("%s 非法：%q（5..3600）", tier.key, v)
+			}
+			*tier.dst = n
+		}
+	}
+	for _, act := range []struct {
+		key string
+		dst *string
+	}{
+		{"QINYUAN_APPROVAL_LOW_ACTION", &c.ApprovalLowAction},
+		{"QINYUAN_APPROVAL_MID_ACTION", &c.ApprovalMidAction},
+		{"QINYUAN_APPROVAL_HIGH_ACTION", &c.ApprovalHighAction},
+	} {
+		if v, _ := pick(act.key, fileVals, ""); v != "" {
+			if v != "allow" && v != "deny" {
+				return nil, fmt.Errorf("%s 非法：%q（allow|deny）", act.key, v)
+			}
+			*act.dst = v
+		}
+	}
 
 	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)
+	// P3-3：连接器端点（只在配置了 URL 时才启用；token 只从 ENV/文件读）。
+	c.Connectors.AssetsURL, _ = pick("QINYUAN_CONNECTOR_ASSETS_URL", fileVals, "")
+	c.Connectors.AssetsToken, _ = pick("QINYUAN_CONNECTOR_ASSETS_TOKEN", fileVals, "")
+	c.Connectors.TicketURL, _ = pick("QINYUAN_CONNECTOR_TICKET_URL", fileVals, "")
+	c.Connectors.TicketToken, _ = pick("QINYUAN_CONNECTOR_TICKET_TOKEN", fileVals, "")
 	c.LLM.BaseURL, _ = pick("QINYUAN_LLM_BASE_URL", fileVals, c.LLM.BaseURL)
 	c.LLM.APIKey, _ = pick("QINYUAN_LLM_API_KEY", fileVals, c.LLM.APIKey)
 	c.LLM.Model, _ = pick("QINYUAN_LLM_MODEL", fileVals, c.LLM.Model)

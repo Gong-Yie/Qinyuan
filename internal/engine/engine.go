@@ -17,6 +17,7 @@ import (
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
 	"qinyuan/internal/store"
+	"qinyuan/internal/trace"
 )
 
 // 具名取消原因 = 状态机输入（学习.md 1.4）。
@@ -61,6 +62,14 @@ type Config struct {
 	ApprovalTimeout   time.Duration // 等人审批的上限（默认 5 分钟）
 	ApprovalOnTimeout string        // 超时动作：deny（默认）| allow
 	ApprovalDisabled  bool          // 显式关闭审批门（默认 false = 开启，规则默认放行）
+
+	// P3-4：按风险分级的等待预算与超时动作（0 = 用 DefaultTiers）。
+	ApprovalLowSeconds  int
+	ApprovalMidSeconds  int
+	ApprovalHighSeconds int
+	ApprovalLowAction   string
+	ApprovalMidAction   string
+	ApprovalHighAction  string
 }
 
 type runRuntime struct {
@@ -173,6 +182,33 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 	if !cfg.ApprovalDisabled {
 		e.gate = &agent.Gate{
 			Store: st, Timeout: cfg.ApprovalTimeout, OnTimeout: cfg.ApprovalOnTimeout,
+		}
+		e.gate.Tiers = agent.DefaultTiers()
+		if cfg.ApprovalLowSeconds > 0 || cfg.ApprovalMidSeconds > 0 || cfg.ApprovalHighSeconds > 0 {
+			e.gate.Tiers = agent.TierPolicy{
+				LowTimeout:  time.Duration(cfg.ApprovalLowSeconds) * time.Second,
+				MidTimeout:  time.Duration(cfg.ApprovalMidSeconds) * time.Second,
+				HighTimeout: time.Duration(cfg.ApprovalHighSeconds) * time.Second,
+				LowAction:   cfg.ApprovalLowAction,
+				MidAction:   cfg.ApprovalMidAction,
+				HighAction:  cfg.ApprovalHighAction,
+			}
+		}
+		// 预授权放行必须留痕：每一条"没问人就放过"的调用都写一条 activity。
+		e.gate.Audit = func(ctx context.Context, runID, intentID int64, d *store.ApprovalDecision, tool, target string) {
+			var nodeID *int64
+			if intentID > 0 {
+				id := intentID
+				nodeID = &id
+			}
+			e.emit(context.WithoutCancel(ctx), &model.Activity{
+				RunID: runID, NodeID: nodeID, Worker: "gate", Kind: model.ActSystem,
+				Summary: fmt.Sprintf("预授权放行：%s %s（策略 #%d）", tool, target, d.PolicyID),
+				Metadata: map[string]any{
+					"policy_id": d.PolicyID, "tool": tool, "target": target,
+					"source": d.Source, "note": d.Note,
+				},
+			})
 		}
 	}
 	return e
@@ -562,6 +598,12 @@ func (e *Engine) planRound(ctx context.Context, runID int64, final bool) bool {
 	}
 	defer e.endInflightOp(runID)
 
+	// P2-5：这一轮的时间线。子 span（LLM 调用 / 工具调用）自动挂在它下面。
+	ctx = trace.NewSession(ctx, runID, e.emit)
+	ctx = trace.WithWorker(ctx, "planner", 0)
+	ctx, sp := trace.Start(ctx, "planner.round", map[string]any{"final": final})
+	defer sp.End()
+
 	if err := e.Store.StampFirstRun(ctx, runID, run.Task.TimeoutSeconds); err != nil {
 		e.Log.Warn("[planner] 盖 first_run 失败", "run", runID, "err", err)
 	}
@@ -574,16 +616,25 @@ func (e *Engine) planRound(ctx context.Context, runID int64, final bool) bool {
 	})
 
 	triggers := e.drainTriggers(runID)
+	sp.Set("triggers", len(triggers))
+	sp.Set("round", round)
 	e.beginLLMCall(runID)
 	res, err := e.planner.PlanRound(ctx, runID, triggers, agent.PlanOptions{Final: final}, e.KillWork, e.emit)
 	e.endLLMCall(runID)
 
 	if err != nil {
+		sp.Set("error", err.Error())
 		if ctx.Err() == nil {
 			e.Log.Error("[planner] 规划出错", "run", runID, "err", err)
 		}
 		return ctx.Err() == nil
 	}
+	sp.Set("intents", res.Intents)
+	sp.Set("tool_calls", res.ToolCalls)
+	sp.Set("met", res.Met)
+	sp.Set("situation", res.Situation)
+	sp.Set("changes", res.Changes)
+	sp.Set("prompt_bytes", res.PromptBytes)
 	e.Log.Info("[planner] 本轮结果", "run", runID, "triggers", len(triggers),
 		"intents", res.Intents, "tool_calls", res.ToolCalls, "met", res.Met,
 		"situation", res.Situation, "changes", res.Changes, "prompt_bytes", res.PromptBytes)
@@ -631,10 +682,16 @@ func (e *Engine) ensureGoals(ctx context.Context, runID int64, run *model.Run) b
 		Summary: "第 0 轮目标拆解",
 	})
 
+	ctx = trace.NewSession(ctx, runID, e.emit)
+	ctx = trace.WithWorker(ctx, "goals", 0)
+	ctx, sp := trace.Start(ctx, "goals.round", nil)
+	defer sp.End()
+
 	e.beginLLMCall(runID)
 	res, err := e.goals.Decompose(ctx, runID, e.emit)
 	e.endLLMCall(runID)
 	if err != nil {
+		sp.Set("error", err.Error())
 		if ctx.Err() != nil {
 			return false
 		}
@@ -646,6 +703,9 @@ func (e *Engine) ensureGoals(ctx context.Context, runID int64, run *model.Run) b
 		})
 		return true
 	}
+	sp.Set("goals", res.Goals)
+	sp.Set("constraints", res.Constraints)
+	sp.Set("scopes", res.Scopes)
 
 	ok, err := e.Store.MarkGoalsDecomposed(ctx, runID)
 	if err != nil {
@@ -696,6 +756,8 @@ func (e *Engine) workerLoop(ctx context.Context, runID int64, name string) {
 
 // Work 执行一次"领取 + 执行 + 落终态"。返回是否领到了活。
 func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, error) {
+	// P2-5：一次领取 = 一条时间线的根（intent.execute）；worker 的 LLM/工具 span 挂在它下面。
+	ctx = trace.NewSession(ctx, runID, e.emit)
 	run, err := e.Store.Run(ctx, runID)
 	if err != nil {
 		return false, err
@@ -731,6 +793,14 @@ func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, err
 	e.beginInflight(runID)
 	defer e.endInflight(runID)
 
+	// 意图级 span：worker 的 llm.call / tool.call 都挂在它下面，
+	// 于是"第 3 轮 → 意图 #42 → 第 2 次工具调用"能从时间线直接读出来。
+	ctx = trace.WithWorker(ctx, owner, intent.ID)
+	ctx, sp := trace.Start(ctx, "intent.execute", map[string]any{
+		"intent_id": intent.ID, "owner": owner, "priority": intent.Priority,
+	})
+	defer sp.End()
+
 	workCtx, cancel := context.WithCancelCause(ctx)
 	e.registerWork(intent.ID, runID, cancel)
 	defer e.unregisterWork(intent.ID)
@@ -754,6 +824,15 @@ func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, err
 		}
 	}
 	state := e.settle(ctx, runID, intent.ID, out, cause)
+	sp.Set("state", state)
+	sp.Set("reason", out.Reason)
+	sp.Set("turns", out.Turns)
+	sp.Set("facts", out.Facts)
+	sp.Set("findings", out.Findings)
+	sp.Set("assets", out.Assets)
+	if out.Err != nil {
+		sp.Set("error", out.Err.Error())
+	}
 	e.emit(context.WithoutCancel(ctx), &model.Activity{
 		RunID: runID, NodeID: &intent.ID, Worker: owner, Kind: model.ActSystem,
 		Summary: fmt.Sprintf("意图 #%d 结束：%s（%s）", intent.ID, state, out.Reason),
@@ -837,6 +916,11 @@ func (e *Engine) settleTask(ctx context.Context, runID int64) {
 		e.mu.Unlock()
 	}()
 
+	ctx = trace.NewSession(ctx, runID, e.emit)
+	ctx = trace.WithWorker(ctx, "system", 0)
+	ctx, sp := trace.Start(ctx, "task.settle", nil)
+	defer sp.End()
+
 	e.emit(context.WithoutCancel(ctx), &model.Activity{
 		RunID: runID, Worker: "system", Kind: model.ActSystem,
 		Summary: "任务时间到，进入收尾",
@@ -853,6 +937,7 @@ func (e *Engine) settleTask(ctx context.Context, runID int64) {
 		}
 	}
 	// 2) 硬兜底：还没停的直接 cancel（意图会归 exhausted）。
+	sp.Set("inflight_at_stop", e.Inflight(runID))
 	e.StopTask(runID, ErrTimeoutSettling)
 	// StopTask 已经 cancel 了 rctx；后面几步必须用"不随取消失效"的 ctx，
 	// 否则收尾会停在半路，任务永远落不了 timeout。

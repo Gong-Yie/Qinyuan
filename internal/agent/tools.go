@@ -106,6 +106,15 @@ func NewRegistry(tools ...*Tool) *Registry {
 // Names 返回工具名（按注册顺序）。
 func (r *Registry) Names() []string { return append([]string(nil), r.order...) }
 
+// IsReadOnly 报告某个工具是否只读（span 属性与"哪些调用不该要审批"都用它）。
+func (r *Registry) IsReadOnly(name string) bool {
+	if r == nil {
+		return false
+	}
+	t, ok := r.tools[name]
+	return ok && t.ReadOnly
+}
+
 // Without 返回一个去掉指定工具的新 registry（收尾轮用它隐藏危险工具）。
 //
 // 返回新对象而不是原地删：同一个 registry 会被别的回合复用，改掉了会污染下一轮。

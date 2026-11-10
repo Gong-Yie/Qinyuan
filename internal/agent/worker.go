@@ -13,6 +13,7 @@ import (
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
 	"qinyuan/internal/store"
+	"qinyuan/internal/trace"
 )
 
 // Outcome 一次执行的结论。engine 据此决定意图落哪个终态。
@@ -176,17 +177,31 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 			Messages:   msgs,
 			Tools:      specs,
 		}
-		resp, err := completeTurn(execCtx, provider, req, func(d time.Duration) {
+		callCtx, csp := trace.Start(execCtx, "llm.call", map[string]any{
+			"turn": turn, "session": req.SessionKey, "messages": len(msgs),
+		})
+		resp, err := completeTurn(callCtx, provider, req, func(d time.Duration) {
 			if out.TTFTMs != 0 {
 				return
 			}
 			out.TTFTMs = d.Milliseconds()
+			csp.Set("ttft_ms", out.TTFTMs)
 			emit(execCtx, &model.Activity{
 				RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
 				Summary:  fmt.Sprintf("首字延迟 %dms（流式）", out.TTFTMs),
 				Metadata: map[string]any{"ttft_ms": out.TTFTMs, "turn": turn},
 			})
 		})
+		if err != nil {
+			csp.Set("error", err.Error())
+		}
+		if resp != nil {
+			csp.Set("input_tokens", resp.Usage.Input)
+			csp.Set("output_tokens", resp.Usage.Output)
+			csp.Set("cache_read_tokens", resp.Usage.CacheRead)
+			csp.Set("tool_calls", len(resp.ToolCalls))
+		}
+		csp.End()
 		if err != nil {
 			// 已提交后断流：保留已经拿到的部分结果（不再重放）。
 			if resp != nil && resp.Text != "" {
@@ -303,7 +318,13 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 			}
 
 			rc.ToolUseID = tc.ID
-			res := w.Registry.Call(execCtx, rc, tc.Name, tc.Input)
+			toolCtx, tsp := trace.Start(execCtx, "tool.call", map[string]any{
+				"tool": tc.Name, "tool_use_id": tc.ID, "read_only": w.Registry.IsReadOnly(tc.Name),
+			})
+			res := w.Registry.Call(toolCtx, rc, tc.Name, tc.Input)
+			tsp.Set("error", res.IsError)
+			tsp.Set("output_bytes", len(res.Text))
+			tsp.End()
 			rc.ToolUseID = ""
 			if !res.IsError {
 				switch tc.Name {

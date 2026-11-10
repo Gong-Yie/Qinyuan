@@ -12,6 +12,7 @@ import (
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
 	"qinyuan/internal/store"
+	"qinyuan/internal/trace"
 )
 
 // Trigger 是"本轮为什么被唤醒"的一条记录。
@@ -200,12 +201,22 @@ func (p *Planner) PlanRound(ctx context.Context, runID int64, triggers []Trigger
 		if ctx.Err() != nil {
 			return out, ctx.Err()
 		}
-		resp, err := provider.Complete(ctx, &llm.Request{
+		callCtx, csp := trace.Start(ctx, "llm.call", map[string]any{
+			"role": "planner", "turn": turn, "session": sessionKey, "messages": len(msgs),
+		})
+		resp, err := provider.Complete(callCtx, &llm.Request{
 			SessionKey: sessionKey, System: system, Messages: msgs, Tools: specs,
 		})
 		if err != nil {
+			csp.Set("error", err.Error())
+			csp.End()
 			return out, err
 		}
+		csp.Set("input_tokens", resp.Usage.Input)
+		csp.Set("output_tokens", resp.Usage.Output)
+		csp.Set("cache_read_tokens", resp.Usage.CacheRead)
+		csp.Set("tool_calls", len(resp.ToolCalls))
+		csp.End()
 		out.Usage.Input += resp.Usage.Input
 		out.Usage.Output += resp.Usage.Output
 		out.Usage.CacheRead += resp.Usage.CacheRead
@@ -241,7 +252,14 @@ func (p *Planner) PlanRound(ctx context.Context, runID int64, triggers []Trigger
 				Metadata: map[string]any{"tool_call_id": tc.ID},
 			})
 
-			res := p.Registry.Call(ctx, rc, tc.Name, tc.Input)
+			toolCtx, tsp := trace.Start(ctx, "tool.call", map[string]any{
+				"tool": tc.Name, "tool_use_id": tc.ID, "read_only": p.Registry.IsReadOnly(tc.Name),
+				"role": "planner",
+			})
+			res := p.Registry.Call(toolCtx, rc, tc.Name, tc.Input)
+			tsp.Set("error", res.IsError)
+			tsp.Set("output_bytes", len(res.Text))
+			tsp.End()
 			if tc.Name == "add_intent" && !res.IsError {
 				out.Intents += countIntents(res.Text)
 			}

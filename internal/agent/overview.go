@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"qinyuan/internal/graphstore"
 	"qinyuan/internal/model"
 	"qinyuan/internal/store"
 )
@@ -60,21 +61,23 @@ type Overview struct {
 	Entities      int             `json:"entities"`
 	Scopes        []string        `json:"scopes"`
 	Coverage      *store.Coverage `json:"coverage,omitempty"`
+	// Campaign 只在这个 run 属于某个战役时出现（零注入：独立任务看不到它）。
+	Campaign    *store.CampaignView `json:"campaign,omitempty"`
 	GeneratedAt   int64           `json:"generated_at"`
 }
 
 // BuildOverview 组装态势。withCoverage=false（worker）时不带覆盖度。
 // 预取的返回与 overview 工具的返回必须是同一份代码，才能保证"看到的"和"调到的"一致。
-func BuildOverview(ctx context.Context, st *store.Store, runID int64, withCoverage bool) (*Overview, error) {
-	run, err := st.Run(ctx, runID)
+func BuildOverview(ctx context.Context, g graphstore.Graph, runID int64, withCoverage bool) (*Overview, error) {
+	run, err := g.Run(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	scopes, err := st.Scopes(ctx, runID)
+	scopes, err := g.Scopes(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	edges, err := st.Edges(ctx, runID)
+	edges, err := g.Edges(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +104,7 @@ func BuildOverview(ctx context.Context, st *store.Store, runID int64, withCovera
 	}
 	if run.Task != nil {
 		// 派生状态必须用真实计数，不能写死 —— 否则 overview 与列表页会给出两个状态。
-		active, err := st.HasActiveIntent(ctx, runID)
+		active, err := g.HasActiveIntent(ctx, runID)
 		if err != nil {
 			return nil, err
 		}
@@ -114,48 +117,48 @@ func BuildOverview(ctx context.Context, st *store.Store, runID int64, withCovera
 		ov.Scopes = []string{}
 	}
 
-	if ov.Goals, err = briefs(ctx, st, runID, model.KindGoal, 20, nil); err != nil {
+	if ov.Goals, err = briefs(ctx, g, runID, model.KindGoal, 20, nil); err != nil {
 		return nil, err
 	}
-	if ov.Hints, err = briefs(ctx, st, runID, model.KindHint, 10, nil); err != nil {
+	if ov.Hints, err = briefs(ctx, g, runID, model.KindHint, 10, nil); err != nil {
 		return nil, err
 	}
-	if ov.Facts, err = briefs(ctx, st, runID, model.KindFact, 20, fromIntent); err != nil {
+	if ov.Facts, err = briefs(ctx, g, runID, model.KindFact, 20, fromIntent); err != nil {
 		return nil, err
 	}
-	if ov.Findings, err = briefs(ctx, st, runID, model.KindFinding, 10, fromIntent); err != nil {
+	if ov.Findings, err = briefs(ctx, g, runID, model.KindFinding, 10, fromIntent); err != nil {
 		return nil, err
 	}
-	if ov.Open, err = briefsByState(ctx, st, runID, model.StateOpen, 30, parents, yields); err != nil {
+	if ov.Open, err = briefsByState(ctx, g, runID, model.StateOpen, 30, parents, yields); err != nil {
 		return nil, err
 	}
-	if ov.Running, err = briefsByState(ctx, st, runID, model.StateRunning, 30, parents, yields); err != nil {
+	if ov.Running, err = briefsByState(ctx, g, runID, model.StateRunning, 30, parents, yields); err != nil {
 		return nil, err
 	}
-	if ov.RecentDone, err = briefsByState(ctx, st, runID, model.StateDone, 12, parents, yields); err != nil {
+	if ov.RecentDone, err = briefsByState(ctx, g, runID, model.StateDone, 12, parents, yields); err != nil {
 		return nil, err
 	}
 
-	if ov.Frontier, err = st.CountIntentState(ctx, runID, model.StateOpen); err != nil {
+	if ov.Frontier, err = g.CountIntentState(ctx, runID, model.StateOpen); err != nil {
 		return nil, err
 	}
-	if ov.DoneTotal, err = st.CountIntentState(ctx, runID, model.StateDone); err != nil {
+	if ov.DoneTotal, err = g.CountIntentState(ctx, runID, model.StateDone); err != nil {
 		return nil, err
 	}
-	if ov.FactsTotal, err = st.CountByKind(ctx, runID, model.KindFact); err != nil {
+	if ov.FactsTotal, err = g.CountByKind(ctx, runID, model.KindFact); err != nil {
 		return nil, err
 	}
-	if ov.FindingsTotal, err = st.CountByKind(ctx, runID, model.KindFinding); err != nil {
+	if ov.FindingsTotal, err = g.CountByKind(ctx, runID, model.KindFinding); err != nil {
 		return nil, err
 	}
-	ents, err := st.ListEntitiesForRun(ctx, runID, 500)
+	ents, err := g.ListEntitiesForRun(ctx, runID, 500)
 	if err != nil {
 		return nil, err
 	}
 	ov.Entities = len(ents)
 
 	// 计划图摘要：只给标题、计数与 ready 步骤 —— planner 的"本轮只能从 ready 里选"靠它。
-	if pg, err := st.PlanGraph(ctx, runID); err == nil && pg.PlanID > 0 {
+	if pg, err := g.PlanGraph(ctx, runID); err == nil && pg.PlanID > 0 {
 		pb := &PlanBrief{PlanID: pg.PlanID, Title: pg.Title, Strategy: pg.Strategy, Revision: pg.Revision}
 		for _, s := range pg.Steps {
 			pb.StepsTotal++
@@ -173,11 +176,16 @@ func BuildOverview(ctx context.Context, st *store.Store, runID int64, withCovera
 	}
 
 	if withCoverage {
-		cov, err := st.Coverage(ctx, runID)
+		cov, err := g.Coverage(ctx, runID)
 		if err != nil {
 			return nil, err
 		}
 		ov.Coverage = cov
+	}
+	// P3-1：同战役上下文（别的子 run 已经测过什么、重复投入有多少）。
+	// 读失败不该让规划失败 —— 战役是增强，不是前置条件。
+	if cv, cerr := g.CampaignViewForRun(ctx, runID); cerr == nil {
+		ov.Campaign = cv
 	}
 	return ov, nil
 }
@@ -190,8 +198,8 @@ func stepSummary(s store.StepView) string {
 	return s.Text + "（期望证据：" + s.Expected + "）"
 }
 
-func briefs(ctx context.Context, st *store.Store, runID int64, kind string, limit int, fromIntent map[int64]int64) ([]Brief, error) {
-	nodes, err := st.NodesByKind(ctx, runID, kind, limit)
+func briefs(ctx context.Context, g graphstore.Graph, runID int64, kind string, limit int, fromIntent map[int64]int64) ([]Brief, error) {
+	nodes, err := g.NodesByKind(ctx, runID, kind, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -212,8 +220,8 @@ func briefs(ctx context.Context, st *store.Store, runID int64, kind string, limi
 	return out, nil
 }
 
-func briefsByState(ctx context.Context, st *store.Store, runID int64, state string, limit int, parents, yields map[int64][]int64) ([]Brief, error) {
-	nodes, err := st.NodesByKind(ctx, runID, model.KindIntent, 500)
+func briefsByState(ctx context.Context, g graphstore.Graph, runID int64, state string, limit int, parents, yields map[int64][]int64) ([]Brief, error) {
+	nodes, err := g.NodesByKind(ctx, runID, model.KindIntent, 500)
 	if err != nil {
 		return nil, err
 	}

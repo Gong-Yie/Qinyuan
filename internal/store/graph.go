@@ -537,6 +537,24 @@ func (s *Store) addKnowledge(ctx context.Context, in knowledgeInput) (int64, err
 			return 0, err
 		}
 	}
+
+	// P2-3：finding 入库与"通知/回写外部系统"是同一个事务。
+	// 提交了 → 一定有人会去投递；回滚了 → 一定没有这条事件（不会出现"通知说有、库里没有"）。
+	if in.Kind == model.KindFinding {
+		summary, _ := in.Payload["summary"].(string)
+		name, _ := in.Payload["name"].(string)
+		severity, _ := in.Payload["severity"].(string)
+		if _, _, err := s.EnqueueOutboxTx(ctx, tx, in.RunID, TopicFindingRecorded, map[string]any{
+			"finding_id": nodeID,
+			"run_id":     in.RunID,
+			"name":       name,
+			"severity":   severity,
+			"summary":    summary,
+		}); err != nil {
+			return 0, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}

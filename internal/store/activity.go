@@ -31,13 +31,16 @@ func (s *Store) AppendActivity(ctx context.Context, a *model.Activity) (int64, e
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO activity (run_id, node_id, worker, kind, tool, tool_use_id, is_error,
 		                      summary, detail, metadata, input_tokens, output_tokens,
-		                      cache_read_tokens, cache_write_tokens, segment)
+		                      cache_read_tokens, cache_write_tokens, segment,
+		                      trace_id, span_id, parent_span_id, span_name, duration_ms)
 		VALUES ($1,$2,NULLIF($3,''),$4,NULLIF($5,''),NULLIF($6,''),$7,$8,$9,$10,
-		        NULLIF($11,0),NULLIF($12,0),NULLIF($13,0),NULLIF($14,0),$15)
+		        NULLIF($11,0),NULLIF($12,0),NULLIF($13,0),NULLIF($14,0),$15,
+		        $16,$17,$18,$19,$20)
 		RETURNING id`,
 		a.RunID, a.NodeID, clean(a.Worker), a.Kind, clean(a.Tool), clean(a.ToolUseID), a.IsError,
 		clean(a.Summary), clean(a.Detail), cleanJSON(rawMeta),
-		a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens, a.Segment).Scan(&id)
+		a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens, a.Segment,
+		clean(a.TraceID), clean(a.SpanID), clean(a.ParentSpanID), clean(a.SpanName), a.DurationMs).Scan(&id)
 	return id, err
 }
 

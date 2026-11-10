@@ -138,6 +138,7 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at, r.seeds,
+		       COALESCE(r.campaign_id,0), r.campaign_role,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
 		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
 		       t.goals_at
@@ -150,6 +151,7 @@ func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 	var name *string
 	var runID *int64
 	err := row.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Seeds,
+		&r.CampaignID, &r.CampaignRole,
 		&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
 		&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
 		&t.GoalsAt)
@@ -179,6 +181,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.goal, COALESCE(r.description,''), r.status, r.round_no, r.version, r.created_at, r.updated_at, r.seeds,
+		       COALESCE(r.campaign_id,0), r.campaign_role,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
 		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
 		       t.goals_at
@@ -196,6 +199,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 		var desc, name *string
 		var runID *int64
 		if err := rows.Scan(&r.ID, &r.Goal, &desc, &r.Status, &r.RoundNo, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Seeds,
+			&r.CampaignID, &r.CampaignRole,
 			&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
 			&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
 			&t.GoalsAt); err != nil {

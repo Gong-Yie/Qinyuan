@@ -130,6 +130,16 @@ pwsh -File scripts/demo/demo-m4.ps1
 | GET | `/api/runs/{id}/events?since=&limit=` | 差分态势：`(since, 当前版本]` 内的节点/边变化 |
 | GET | `/api/runs/{id}/coverage` | 覆盖度（只认 fact 锚点，排除 origin） |
 | POST | `/api/runs/{id}/work` | 手动触发一次领取+执行 |
+| GET | `/api/runs/{id}/timeline` | 执行时间线（span 树；`?stats=1` 给 p50/p95/p99） |
+| GET | `/api/outbox` · `/api/outbox/stats` | outbox 积压/死信（`POST /api/outbox/{id}/replay` 重放） |
+| GET/POST | `/api/campaigns` · `/api/campaigns/{id}` | 战役：总覆盖度/进度/重复投入 |
+| POST | `/api/campaigns/{id}/control` | 战役级暂停/恢复（级联到子 run） |
+| GET/POST | `/api/approval-policies` | 审批策略（预授权须带限速+到期） |
+| POST | `/api/approvals/batch-decide` | 批量批准/拒绝（冲突项不覆盖） |
+| GET | `/api/approval-grants` | 预授权放行审计 |
+| GET | `/api/runs/{id}/report?format=md\|html\|zip\|json` | 可复现报告（默认脱敏，`full=1` 需授权） |
+| GET | `/api/connectors/deliveries` | 外部集成投递台账 |
+| POST | `/api/runs/{id}/sync-tickets` · `/ci-export` · `/ci-result` | 工单回写 / CI 导出 / 回归回写 |
 
 错误统一 `{"error": "中文可读原因"}`。所有时间戳为 unix 秒。
 
@@ -185,6 +195,7 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M6a~~ ✅ | 审批门（规则 → 人工挂起，默认只对 DELETE/PUT/PATCH 要审批） | 危险动作在工具执行前被拦住；批准后继续 |
 | ~~M6b~~ ✅ | 流量录制（工具层录制 + PG 索引 + 证据快照） | 请求/响应可检索可回放、能绑到 finding |
 | ~~M6c~~ ✅ | finding 复测（重放+断言）+ Markdown 报告 | 三种 finding 分别 verified/failed/unverifiable；报告带可执行 curl |
+| ~~M7~~ ✅ | 平台化七件套：trace 时间线 / outbox / 可插拔 GraphStore / 战役视图 / 审批 SLA / 可复现报告 / 双向集成（`docs/15`） | 时间线能还原"轮→意图→工具"；推 5 次只手 1 个单；报告 zip 自包含 |
 
 ---
 

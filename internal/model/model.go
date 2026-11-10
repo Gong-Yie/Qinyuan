@@ -96,6 +96,9 @@ type Run struct {
 	Status    string
 	RoundNo   int64
 	Version   int64
+	// CampaignID / CampaignRole：这个 run 属于哪个战役、负责哪一块（0/空 = 独立任务）。
+	CampaignID   int64
+	CampaignRole string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Task      *Task
@@ -199,6 +202,14 @@ type Activity struct {
 	CacheWriteTokens int
 	Segment          *int
 	CreatedAt        time.Time
+
+	// P2-5：trace / span。span 行（Kind=ActSpan）带这五个字段，
+	// 普通活动行留空 —— 于是"时间线"和"过程记录"是同一张表、同一份写入路径。
+	TraceID      string
+	SpanID       string
+	ParentSpanID string
+	SpanName     string
+	DurationMs   int
 }
 
 // Activity kinds（与 ARTEX 对齐的一小部分，后续按需扩展）。
@@ -211,6 +222,9 @@ const (
 	ActResult     = "result"
 	ActRound      = "round"
 	ActSystem     = "system"
+	// ActSpan 是一段被计时的执行（planner 轮次 / 意图执行 / LLM 调用 / 工具调用）。
+	// 它出现在过程流里，但前端应当按"时间线"渲染，而不是当成一张工具卡片。
+	ActSpan = "span"
 )
 
 // Entity 领域实体（跨 run 共享）。

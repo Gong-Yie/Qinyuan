@@ -509,3 +509,151 @@ CREATE TABLE IF NOT EXISTS finding_retests (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_retests_finding ON finding_retests(run_id, finding_id, id DESC);
+
+-- ---------------------------------------------------------------------------
+-- P2-5：trace / span（把"一次执行"串成时间线）
+--
+-- 取舍：**不建 spans 表**，span 直接落在 activity 上。理由是单一发射点：
+-- 落库 + 推流 + 留痕必须走同一条路，否则时间线与过程记录一定会对不上。
+--
+-- trace_id 是**确定性**的（qy-<runID>），不是每次启动随机：
+-- 重启后要给同一个任务补 span，随机会让旧 span 与新的断成两条时间线。
+-- span 行 kind='span'，attrs 放 metadata，只把"要查询/排序的"提成真列：
+-- span_name（按名字聚合 p99）、duration_ms（慢请求定位）、parent_span_id（还原层级）。
+-- ---------------------------------------------------------------------------
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS trace_id       TEXT NOT NULL DEFAULT '';
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS span_id        TEXT NOT NULL DEFAULT '';
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS parent_span_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS span_name      TEXT NOT NULL DEFAULT '';
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS duration_ms    INT  NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_act_span      ON activity(run_id, id) WHERE span_id <> '';
+CREATE INDEX IF NOT EXISTS idx_act_span_name ON activity(run_id, span_name, duration_ms) WHERE span_id <> '';
+
+-- P2-3：outbox（写库与"写库后必须发生的副作用"同一个事务）
+--
+-- 为什么必须有它：finding 入库了但通知没发（或发两次）、任务删了但外部系统还留着单，
+-- 这类问题都来自"两处代码各写各的"。outbox 把它们变成一个事务里的两行：
+-- 业务行 + 事件行；提交后就一定有人会去投递（重启/停机都不丢）。
+--
+-- 幂等键 (topic, payload_hash)：同一个事件重复入队只留一行。
+-- 这比"调用方自觉只发一次"可靠 —— 重试层会重放整条意图（L4）。
+--
+-- 领用用 FOR UPDATE SKIP LOCKED + 租约（locked_until），所以多实例并发安全。
+-- activity 的 SSE 广播不走 outbox：它要求低延迟且可丢（与 ARTEX 同一取舍）。
+CREATE TABLE IF NOT EXISTS outbox (
+    id           BIGSERIAL PRIMARY KEY,
+    run_id       BIGINT REFERENCES runs(id) ON DELETE CASCADE,
+    topic        TEXT NOT NULL,
+    payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload_hash TEXT NOT NULL DEFAULT '',
+    attempts     INT NOT NULL DEFAULT 0,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    locked_until TIMESTAMPTZ,
+    done_at      TIMESTAMPTZ,
+    dead_at      TIMESTAMPTZ,
+    last_error   TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_outbox_event ON outbox(topic, payload_hash);
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(available_at, id)
+    WHERE done_at IS NULL AND dead_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_outbox_dead ON outbox(dead_at DESC) WHERE dead_at IS NOT NULL;
+
+-- P3-4：审批策略（预授权 / 批量 / 按风险分级的超时）
+--
+-- 与 intercept_rules 的区别：规则只回答"要不要问人"，策略还要回答
+-- "能不能不问人就直接放行（预授权）"以及"放行到什么程度为止（限速/到期）"。
+--
+-- 判定顺序（两段式，deny 不可被覆盖）：
+--   1) 任何启用的 deny 策略命中 → deny（连规则里的 allow 也盖不住）
+--   2) 规则里的 deny 命中 → deny
+--   3) 其余策略按 priority 降序取第一条 → allow/ask；allow 受 max_per_hour 限制
+--   4) 没命中 → 回到规则表（老行为，catch-all allow 兜底）
+--
+-- approval_grants 既是审计（每条预授权放行都留一行）也是限速的计数来源：
+-- 用"最近一小时放过几次"来判 max_per_hour，不需要在内存里记窗口。
+CREATE TABLE IF NOT EXISTS approval_policies (
+    id           BIGSERIAL PRIMARY KEY,
+    run_id       BIGINT REFERENCES runs(id) ON DELETE CASCADE,   -- 空 = 全局
+    priority     INT NOT NULL DEFAULT 100,
+    match_tool   TEXT NOT NULL DEFAULT '',
+    match_regex  TEXT NOT NULL DEFAULT '',
+    match_scope  TEXT NOT NULL DEFAULT 'any'
+                 CHECK (match_scope IN ('same_target','in_scope','any')),
+    decision     TEXT NOT NULL CHECK (decision IN ('allow','deny','ask')),
+    max_per_hour INT,
+    expires_at   TIMESTAMPTZ,
+    note         TEXT NOT NULL DEFAULT '',
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_approval_policies_lookup
+    ON approval_policies(priority DESC, id DESC) WHERE enabled;
+
+CREATE TABLE IF NOT EXISTS approval_grants (
+    id         BIGSERIAL PRIMARY KEY,
+    policy_id  BIGINT NOT NULL REFERENCES approval_policies(id) ON DELETE CASCADE,
+    run_id     BIGINT NOT NULL,
+    tool       TEXT NOT NULL DEFAULT '',
+    target     TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_approval_grants_rate ON approval_grants(policy_id, created_at DESC);
+
+-- P3-1：战役（campaign）= run 的父容器
+--
+-- 存在的理由不是"分组好看"，而是三个只有跨 run 才能回答的问题：
+--   1) 总覆盖度：战役范围里的实体，被任一子 run 的 fact 锚定过的比例；
+--   2) 总进度：所有子 run 的目标状态聚合；
+--   3) 重复投入：同一实体被多个子 run 测过 → 该拆分/该合并的信号。
+--
+-- 范围只允许"减"不允许"加"：子 run 继承战役范围，但战役加宽必须人显式确认
+-- （升级计划 P3-1 的风险缓解）。
+-- 删除战役**不级联删 run**（ON DELETE SET NULL）：先解绑再删，避免误删证据。
+CREATE TABLE IF NOT EXISTS campaigns (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    goal       TEXT NOT NULL,
+    org_ids    BIGINT[] NOT NULL DEFAULT '{}',
+    status     TEXT NOT NULL DEFAULT 'active'
+               CHECK (status IN ('active','paused','done','archived')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS campaign_id BIGINT REFERENCES campaigns(id) ON DELETE SET NULL;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS campaign_role TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_runs_campaign ON runs(campaign_id) WHERE campaign_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS campaign_scope (
+    id          BIGSERIAL PRIMARY KEY,
+    campaign_id BIGINT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('root_domain','subdomain','ip','cidr','org','icp','keyword')),
+    domain      TEXT,
+    net         CIDR,
+    org_id      BIGINT,
+    value       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_scope ON campaign_scope(campaign_id, kind,
+    COALESCE(domain, ''), COALESCE(net::text, ''), COALESCE(org_id, 0), COALESCE(value, ''));
+
+-- P3-3：连接器投递台账（幂等键 = connector + event_key）
+--
+-- 为什么要单独一张表：outbox 保证"至少一次"，外部系统需要"恰好一次"。
+-- 台账记下"这个事件已经推给这个连接器、外部 id 是什么"，重投时直接跳过。
+-- 它与 outbox 的关系：outbox 是"要送出去什么"，台账是"已经送到哪、对面怎么叫它"。
+CREATE TABLE IF NOT EXISTS connector_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    connector   TEXT NOT NULL,
+    event_key   TEXT NOT NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pushed',
+    last_error  TEXT NOT NULL DEFAULT '',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_connector_delivery ON connector_deliveries(connector, event_key);
+CREATE INDEX IF NOT EXISTS idx_connector_delivery_ext ON connector_deliveries(connector, external_id)
+    WHERE external_id <> '';

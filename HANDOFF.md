@@ -46,6 +46,7 @@
 | M6a | 审批门（规则 → 人工挂起；默认只对 DELETE/PUT/PATCH 要审批） | ✅ |
 | M6b | 流量录制（工具层录制 + PG 索引 + 证据快照；**不做代理**，见 `docs/13 §1`） | ✅ |
 | M6c | finding 复测（重放+断言，三档结论）+ Markdown 报告 | ✅ |
+| M7 | 平台化七件套：trace / outbox / GraphStore+memstore / 战役 / 审批 SLA / 可复现报告 / 连接器（见 `docs/15`） | ✅（部分到 S1–S2，见该文 §0） |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -142,6 +143,10 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_SETTLEMENT_TIMEOUT_SECONDS` | `120` | 收尾轮独立预算（10..900） |
 | `QINYUAN_CONTEXT_WINDOW_K` | `200` | 上下文窗口估计（K token）；0 = 关闭压缩 |
 | `QINYUAN_MAX_CONCURRENT_RUNS` | `0` | 同时跑的任务上限；0 = 不限（1..100） |
+| `QINYUAN_APPROVAL_LOW_SECONDS` / `_MID_` / `_HIGH_` | `60` / `300` / `900` | 按风险分级的审批等待预算（5..3600） |
+| `QINYUAN_APPROVAL_{LOW,MID,HIGH}_ACTION` | `allow` / `deny` / `deny` | 分级超时动作 |
+| `QINYUAN_CONNECTOR_ASSETS_URL` / `_TOKEN` | 空 | 资产回写端点（空 = 不启用连接器） |
+| `QINYUAN_CONNECTOR_TICKET_URL` / `_TOKEN` | 空 | 工单端点（空 = 不启用） |
 
 ---
 
@@ -158,7 +163,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 03-M3.5-目标拆解与差分态势.md
 │   ├── 04-M4a-撞预算不白跑.md
 │   ├── 05-M4b-删除与准入.md
-│   └── 06-M4c-流式与committed.md
+│   ├── 06-M4c-流式与committed.md
+│   └── 15-M7-平台化七件套.md    trace / outbox / GraphStore / 战役 / 审批SLA / 报告 / 连接器
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -807,6 +813,14 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     （`missing ',' in argument list`）。用「」或转义。
 53. **psql 命令行传中文会炸**（client_encoding）：seed SQL 写成 UTF-8 文件 + `psql -f`，
     并设 `PGCLIENTENCODING=UTF8`。
+54. **新建策略默认 `enabled=false` 会被静默跳过**：`CreateApprovalPolicy` 内部强制置 true
+    （撤销走 DELETE），否则"策略写了不生效"（与坑 #45 同一类）。
+55. **html/template 的 `Funcs` 必须在 `Parse` 之前**：模板里用了 `dict` 而解析时未注册，
+    运行期直接 panic（编译期看不出来）。
+56. **连接器失败不能写"已投递"**：台账里 `status='failed'` 的行不能挡住重试，否则一次网络抖动
+    会让该事件永远不再推（`connectors.Fanout.Handle` 里判 status）。
+57. **中文引号别写进 Go 字符串**（坑 #52 的复现点：报告模板）：用「」或转义。
+58. **SSE 广播别走 outbox**：广播要低延迟且可丢；outbox 只处理"必须恰好一次"的副作用。
 
 ---
 
@@ -836,18 +850,18 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-P0–P4、M5a、M5b 已提交（`566e2c6`…`138aa6d`）。
-**当前工作区未提交的是 M6c（复测 + 报告）**：
-`internal/store/{schema.sql,retest.go}` + `internal/agent/{retest.go,retest_test.go}` +
-`internal/server/{retest_api.go 的一部分（report.go）,server.go}` + `cmd/qinyuan/main.go`（`retest` 子命令）+
-`internal/server/webui/app.js`（发现页复测、任务头报告）+ `docs/14`、`docs/screenshots/m6-retest.png`。
+P0–P4、M5a、M5b、M6 已提交（`566e2c6`…`62e5a5f`）。
+**M7（平台化七件套）已在工作区完成并提交**：schema 增 activity span 列 / outbox /
+approval_policies+grants / campaigns+campaign_scope / connector_deliveries；
+新包 `internal/{trace,outbox,connectors,report,graphstore/graphstore,graphstore/memstore}`；
+新 API 见 `docs/15 §9`。工作区应为干净（`git status` 无改动）。
 
-`docs/00–14` 是设计与验收记录；本文是状态快照。
+`docs/00–15` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 110 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 146 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/队列/删除/流式 TTFT）

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"qinyuan/internal/agent"
+	"qinyuan/internal/connectors"
 	"qinyuan/internal/engine"
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
@@ -35,6 +36,8 @@ type Server struct {
 	Bus *Bus
 	// LLMConfigured 表示接的是真实 provider（false = fake，任务不会真的调模型）。
 	LLMConfigured bool
+	// Connectors 是 P3-3 的外部集成扇出（nil = 未启用）。
+	Connectors *connectors.Fanout
 }
 
 // New 构造。
@@ -74,6 +77,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/retests", s.handleRetests)
 	mux.HandleFunc("GET /api/runs/{id}/report", s.handleReport)
 	mux.HandleFunc("GET /api/approvals/count", s.handleApprovalCount)
+	mux.HandleFunc("POST /api/approvals/batch-decide", s.handleBatchDecide)
+	mux.HandleFunc("GET /api/approval-policies", s.handleApprovalPolicies)
+	mux.HandleFunc("POST /api/approval-policies", s.handleCreateApprovalPolicy)
+	mux.HandleFunc("DELETE /api/approval-policies/{pid}", s.handleDeleteApprovalPolicy)
+	mux.HandleFunc("GET /api/approval-grants", s.handleApprovalGrants)
 	mux.HandleFunc("POST /api/approvals/{id}/decide", s.handleDecideApproval)
 	mux.HandleFunc("GET /api/intercept/rules", s.handleInterceptRules)
 	mux.HandleFunc("POST /api/intercept/rules", s.handleCreateInterceptRule)
@@ -94,7 +102,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/graph", s.handleGraph)
 	mux.HandleFunc("GET /api/runs/{id}/coverage-graph", s.handleCoverageGraph)
 	mux.HandleFunc("GET /api/runs/{id}/tokens", s.handleTokens)
+	mux.HandleFunc("GET /api/runs/{id}/timeline", s.handleTimeline)
 	mux.HandleFunc("POST /api/runs/{id}/work", s.handleWork)
+
+	// P2-3：outbox 的运维读口（积压/死信/重放）。
+	mux.HandleFunc("GET /api/outbox", s.handleOutbox)
+	mux.HandleFunc("GET /api/outbox/stats", s.handleOutboxStats)
+	mux.HandleFunc("POST /api/outbox/{oid}/replay", s.handleReplayOutbox)
+
+	// P3-1：战役视图（跨 run 聚合）。
+	mux.HandleFunc("GET /api/campaigns", s.handleListCampaigns)
+	mux.HandleFunc("POST /api/campaigns", s.handleCreateCampaign)
+	mux.HandleFunc("GET /api/campaigns/{cid}", s.handleCampaign)
+	mux.HandleFunc("POST /api/campaigns/{cid}/control", s.handleCampaignControl)
+	mux.HandleFunc("POST /api/campaigns/{cid}/runs", s.handleAttachCampaignRun)
+	mux.HandleFunc("GET /api/campaigns/{cid}/scope", s.handleCampaignScope)
+	mux.HandleFunc("POST /api/campaigns/{cid}/scope", s.handleCampaignScope)
+
+	// P3-3：外部集成（投递台账 / 工单回写 / CI）。
+	mux.HandleFunc("GET /api/connectors/deliveries", s.handleConnectorDeliveries)
+	mux.HandleFunc("POST /api/runs/{id}/sync-tickets", s.handleSyncTickets)
+	mux.HandleFunc("POST /api/runs/{id}/ci-export", s.handleCIExport)
+	mux.HandleFunc("POST /api/runs/{id}/ci-result", s.handleCIResult)
 
 	// 控制台静态资源（go:embed）。必须放在最后：`GET /` 会兜住所有非 API 路径。
 	mux.Handle("GET /", s.staticHandler())
