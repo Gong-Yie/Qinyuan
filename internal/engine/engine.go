@@ -52,6 +52,10 @@ type Config struct {
 	SettlementTurns     int           // 撞预算后的收尾轮数（默认 3）
 	SettlementTimeout   time.Duration // 收尾轮独立预算（默认 2 分钟）
 	ContextWindowTokens int           // 上下文窗口估计（0 = 关闭压缩）
+
+	// M4b：并发准入与删除。
+	MaxConcurrentRuns  int           // 同时跑的任务上限（0 = 不限，保持旧行为）
+	DeleteDrainTimeout time.Duration // 删除时等循环退出/在跑操作静默的上限（默认 10s）
 }
 
 type runRuntime struct {
@@ -76,6 +80,7 @@ type Engine struct {
 	mu          sync.Mutex
 	paused      map[int64]bool
 	settling    map[int64]bool
+	deleting    map[int64]bool
 	taskCancels map[int64]context.CancelCauseFunc
 	workCancels map[int64]context.CancelCauseFunc
 	workRuns    map[int64]int64
@@ -106,6 +111,9 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 	if cfg.FinalPlanTimeout <= 0 {
 		cfg.FinalPlanTimeout = 2 * time.Minute
 	}
+	if cfg.DeleteDrainTimeout <= 0 {
+		cfg.DeleteDrainTimeout = 10 * time.Second
+	}
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = 12
 	}
@@ -124,6 +132,7 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 		Cfg: cfg, Log: log,
 		paused:      map[int64]bool{},
 		settling:    map[int64]bool{},
+		deleting:    map[int64]bool{},
 		taskCancels: map[int64]context.CancelCauseFunc{},
 		workCancels: map[int64]context.CancelCauseFunc{},
 		workRuns:    map[int64]int64{},
@@ -182,6 +191,9 @@ func (e *Engine) Run(ctx context.Context, runID int64) error {
 	}
 	if model.IsTerminalTaskState(run.Task.Status) || run.Task.Paused || run.Task.Queued {
 		return nil
+	}
+	if e.isDeleting(runID) {
+		return nil // 删除屏障：不再起循环
 	}
 
 	e.mu.Lock()
@@ -261,6 +273,8 @@ func (e *Engine) shutdownRuntime(runID int64, cause error) {
 	go func() {
 		rt.wg.Wait()
 		e.Log.Info("[engine] 任务循环退出", "run", runID, "cause", cause)
+		// 一个任务结束就腾出了一个并发槽：立刻补位（不依赖 5s 的兜底 ticker）。
+		e.Reconcile(context.Background())
 	}()
 }
 
@@ -315,7 +329,7 @@ func (e *Engine) Resume(ctx context.Context, runID int64) error {
 	if _, err := e.Store.CASRunTaskStatus(ctx, runID, []string{model.TaskPaused}, model.TaskRunning); err != nil {
 		return err
 	}
-	return e.Run(ctx, runID)
+	return e.Start(ctx, runID)
 }
 
 // KillWork 杀掉一条在跑的意图（planner 的 kill_work）。
@@ -365,6 +379,9 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 
 // Restore 启动恢复：把崩溃残留的 running 打回 open，并给非终态任务重建循环。
 func (e *Engine) Restore(ctx context.Context) (int64, error) {
+	// 先把"删了一半"的暂存目录收尾（DB 已删 → 真删；DB 还在 → 还原）。
+	e.recoverStagedRemovals(ctx)
+
 	reset, err := e.Store.ResetRunningIntents(ctx)
 	if err != nil {
 		return 0, err
@@ -391,6 +408,8 @@ func (e *Engine) Restore(ctx context.Context) (int64, error) {
 		}
 		started++
 	}
+	// 队列里的任务不会自己启动：恢复完立刻按 FIFO 补位一次。
+	e.Reconcile(ctx)
 	e.Log.Info("[engine] 启动恢复完成", "reset_running_intents", reset, "restarted_runs", started)
 	return reset, nil
 }
@@ -471,6 +490,9 @@ func (e *Engine) planRound(ctx context.Context, runID int64, final bool) bool {
 	}
 	if e.isPaused(runID) {
 		return false // 闸门 2
+	}
+	if e.isDeleting(runID) {
+		return false // 闸门 3：正在删除
 	}
 	if e.isSettling(runID) && !final {
 		return false // 闸门 5（收尾中；终局轮由协调器直接调）
@@ -667,6 +689,9 @@ func (e *Engine) Work(ctx context.Context, runID int64, owner string) (bool, err
 	}
 	if e.isPaused(runID) || run.Task.Paused {
 		return false, nil
+	}
+	if e.isDeleting(runID) {
+		return false, nil // 删除屏障：不再领活
 	}
 	if model.IsTerminalTaskState(run.Task.Status) || e.isSettling(runID) {
 		return false, nil

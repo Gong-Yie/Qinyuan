@@ -39,7 +39,7 @@
 | M3a | 计划图（plan/step + depends_on + expected_evidence 规则判定）、覆盖度、off_plan 逃生门 | ✅ |
 | M3.5 | 第 0 轮 goals 拆解（`set_goals`/`set_constraints`/`add_scope`）+ 差分态势（P1-2：`rev` 版本戳 / 增量输入 / `refresh_overview`） | ✅ |
 | M4a | settlement 收尾轮 + compaction/micro-compact + `steer_work` 实时纠偏 | ✅ |
-| M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列 + 完整启动恢复 | ❌ 未做 |
+| M4b | 删除流水线（屏障→排水→两阶段）+ 准入队列（FIFO）+ 完整启动恢复 | ✅ |
 | M4c | 流式输出 + committed 边界 | ❌ 未做 |
 | M5 | activity SSE + Next.js 静态导出 + 链路图 | ❌ 未做 |
 | M6 | 审批门 + 流量录制 + finding 复测 + 报告 | ❌ 未做 |
@@ -136,6 +136,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_SETTLEMENT_TURNS` | `3` | 撞预算后的收尾轮数（0 = 关闭） |
 | `QINYUAN_SETTLEMENT_TIMEOUT_SECONDS` | `120` | 收尾轮独立预算（10..900） |
 | `QINYUAN_CONTEXT_WINDOW_K` | `200` | 上下文窗口估计（K token）；0 = 关闭压缩 |
+| `QINYUAN_MAX_CONCURRENT_RUNS` | `0` | 同时跑的任务上限；0 = 不限（1..100） |
 
 ---
 
@@ -150,7 +151,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 01-M2-规划者与模型接入.md
 │   ├── 02-M3-计划图与覆盖度.md
 │   ├── 03-M3.5-目标拆解与差分态势.md
-│   └── 04-M4a-撞预算不白跑.md
+│   ├── 04-M4a-撞预算不白跑.md
+│   └── 05-M4b-删除与准入.md
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -170,11 +172,12 @@ QINYUAN_LLM_MODEL=deepseek-chat
     │   ├── goals.go           目标 + ProveGoal + 拆解替换 / goals_at 标记
     │   ├── plans.go           计划图 + ready/done 判定 + expectedMatches
     │   ├── delta.go           版本分配（bumpVersion）+ 差分读取（rev > since）
+    │   ├── tasks_lifecycle.go 删除级联 / 队列（Enqueue/NextQueued/CountActive）
     │   └── coverage.go        覆盖度（只认 fact 锚点）
     ├── domain/                归一化（host/URL/eTLD+1/网段）+ 范围闸门
     ├── llm/                   Provider 接口 + Fake/Dynamic + OpenAI 兼容适配
     ├── agent/                 prompt、工具面、worker/planner/goals 执行循环、增量态势
-    ├── engine/                调度：循环、闸门、收尾、超时、恢复、暂停
+    ├── engine/                调度：循环、闸门、收尾、超时、恢复、暂停、删除、准入
     ├── runplan/               用户输入 → 建 run 计划（范围 + 种子实体）
     ├── server/                HTTP 入口（解析 + DTO）
     └── testkit/               测试隔离库与夹具（只被 *_test.go 用）
@@ -192,7 +195,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 
 ### 代码规模（约）
 
-生产 Go ≈ 9.6k 行、测试 ≈ 3.1k 行、schema ≈ 330 行。58 个测试。
+生产 Go ≈ 10.1k 行、测试 ≈ 3.2k 行、schema ≈ 330 行。62 个测试。
 
 ---
 
@@ -339,14 +342,37 @@ Work():
 ### 5.7 启动恢复
 
 ```
+recoverStagedRemovals()       # .deleting/* 按 DB 真相收尾（无 → 真删；有 → 还原）
 ResetRunningIntents()         # running → open（没有活着的 worker 拥有它们）
 每个非终态 run：
   paused → 只记暂停（等用户 resume）
-  queued → 跳过（M4 接准入队列）
+  queued → 跳过（末尾由 Reconcile 按 FIFO 补位）
   其他   → Run() 重建 planner + workers (+ deadline)
+Reconcile()                   # 队列里的任务不会自己启动
 ```
 
 `serve` 启动时自动执行；`work` 不会自动恢复（避免误启动一堆任务）。
+
+### 5.7b 删除与准入（M4b）
+
+```
+删除（stop / DELETE）：
+  BeginDelete（屏障：deleting + paused + 取消在跑 work）
+  → StopTask（有上限）→ waitQuiescent（inflight==0）
+  → data/runs/<id> rename 到 .deleting/<id>-<ts>（可逆）
+  → DB：DELETE run_tasks → DELETE runs（级联）
+  → 提交后才 RemoveAll(暂存) → forgetRun → Reconcile
+  失败：DB 失败 → 还原文件 + 撤销屏障（任务保持 paused）；DB 成功文件失败 → 仍算成功（warning）
+
+准入（启动一个任务）：
+  limit<=0 → 直接 Run
+  active = COUNT(status='running' AND !queued AND !paused)   ← created **不算**占坑
+  active >= limit → EnqueueRun（queued_at 首次写入后不再改）+ 一条 system activity
+  否则 → Dequeue + CAS created/queued→running + Run
+  补位：任务结束/删除时同步一次 + ReconcileLoop(5s) 兜底
+```
+
+**`stop` 就是删除**（钦原没有"停机保号"状态）：想保留数据用 `pause`。
 
 ### 5.8 引擎默认值（可调，但要知道影响）
 
@@ -365,6 +391,8 @@ ResetRunningIntents()         # running → open（没有活着的 worker 拥有
 | `SettlementTurns` | 3 | 撞预算后的收尾轮数（`QINYUAN_SETTLEMENT_TURNS`，0=关） |
 | `SettlementTimeout` | 2min | 收尾轮独立预算（`QINYUAN_SETTLEMENT_TIMEOUT_SECONDS`） |
 | `ContextWindowTokens` | 200k | 压缩阈值用的窗口估计（`QINYUAN_CONTEXT_WINDOW_K`，0=关） |
+| `MaxConcurrentRuns` | 0 | 同时跑的任务上限（`QINYUAN_MAX_CONCURRENT_RUNS`，0=不限） |
+| `DeleteDrainTimeout` | 10s | 删除时等循环退出/静默的上限（安全阀，不进 ENV） |
 
 ---
 
@@ -553,6 +581,10 @@ type Factory interface  { For(sessionKey string) Provider }
 | engine | `TestSteerWorkBlocksNextToolCall` | 纠偏在下一次工具调用前生效、被拦下的写入没落库、模型看到纠偏文本 |
 | agent | `TestCompactionNoOpUnderThreshold` / `MicrosOldToolResults` / `SummarizesAndKeepsPairing` / `SummarizerFailureStillCompacts` | 压缩只在需要时发生；不破坏 tool 配对；摘要失败不拖垮整轮 |
 | agent | `TestEstimateTokensMonotonic` | 估计值随长度单调、CJK 至少一字一 token |
+| engine | `TestDeleteRemovesRunAndFiles` | 删除后 run 与任务目录都不在；暂存清空；重复删除幂等 |
+| engine | `TestDeleteWhileRunning` | 慢任务（5s 调用）能在 8s 内删掉，且 `inflight==0` |
+| engine | `TestAdmissionQueueFIFO` | 上限 1 时 B 排队；A 删掉后 B 被补位 |
+| engine | `TestRecoverStagedRemovals` | `.deleting` 目录按 DB 真相收尾（无→删；有→还原） |
 | llm | `TestOpenAICompleteMapsTools` / `ErrorClassification` / `LooksLikeQuota` / `RetriesTransientThenGivesUp` | 请求/响应映射 + 错误分类 + 重试上限 |
 
 ### 10.3 尚未覆盖（要在对应里程碑补）
@@ -599,10 +631,15 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 ### M4
 
 - ~~settlement 收尾轮~~ ✅ / ~~compaction、micro-compact~~ ✅ / ~~`steer_work`~~ ✅（M4a，见 `docs/04`）；
-- **非流式 → 流式**（以及 committed 边界）：M4c；
-- **删除流水线**（屏障 → 排水 → 两阶段清理）；API 的 `stop` 现在明确返回 **501**，不假装停了：M4b；
-- **准入队列**（`queued` 字段已在库，FIFO 未实现）：M4b；
-- **重启恢复的"完整版"**（deadline 重建、暂存删除恢复）：M4b。
+- ~~删除流水线~~ ✅ / ~~准入队列~~ ✅ / ~~完整启动恢复~~ ✅（M4b，见 `docs/05`）；
+- **非流式 → 流式**（以及 committed 边界）：**只剩这一项**（M4c）。
+
+### M4b 的已知限制
+
+- 删除是**单进程语义**（内存 `deleting` map）：多实例需要 DB 租约；
+- 队列只有 FIFO，没有优先级插队；
+- 没有删除进度端点（只有日志 + 一条 system activity）；
+- 只清 `data/runs/<id>`，没有别的外部资源（流量库 M5/M6 才进来）。
 
 ### M4a 的已知限制
 
@@ -684,12 +721,16 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 21. **压缩按"轮"切，不按"条"切**：一轮 = assistant + 它后面的 tool 结果；按条切会留下孤立的 tool 消息，服务端直接 400。
 22. **`steer_work` 必须回一条 `RoleTool`**（否则 tool_calls 没有结果 → 400）；意图结束时要清空 `steerBox`。
 23. **`record_fact` 的入参是 `facts[] + intent_id`**，不是顶层 `summary`/`evidence` —— 写测试时最容易踩。
+24. **准入计数只认 `status='running'`**：把 `created` 也算进"占坑"，同时建的任务会互相挤进队列（全部排队、谁都不跑）。
+25. **删除要先 rename 文件再删库**：反过来一旦 DB 失败就永久丢数据；DB 成功而文件清理失败**不能回退**状态。
+26. **`stop` 就是删除**：钦原没有"停机保号"状态；想保留数据必须用 `pause`（API 文案已写清）。
 
 ---
 
 ## 15. 当前交付物与 git 状态
 
 ```
+4c1be78 M4a: settlement 收尾轮 + compaction/micro-compact + steer_work 实时纠偏
 1ea3168 M3.5: 第 0 轮目标拆解（set_goals/set_constraints/add_scope）+ 差分态势（rev 版本戳/增量输入/refresh_overview）
 d73d6f4 文档：新增 HANDOFF.md（环境/状态机/已修缺陷/扩展指南），README 加入口
 077f3d3 工具链：接入 mingw-w64，scripts/race.ps1 跑 -race；全量竞态检测通过
@@ -700,15 +741,15 @@ bcb933a 修复暂停路径：settle 用不可取消的 ctx 写库；Work 支持�
 394f5b4 M0/M1: 钦原骨架——幂等迁移、CAS 队列、工具层、worker 闭环、CLI/API 与验收测试
 ```
 
-**M4a 的改动还在工作区，未提交**（同上：先 review 再提交）。
-改动清单：`docs/04` + `internal/agent/{settlement,settlement_run,compaction}.go` + `internal/agent/{worker,tools,tool_planner,planner}.go`
-+ `internal/engine/engine.go` + `internal/config` + `cmd/qinyuan/main.go` + 相应测试。
-`docs/00–04` 是设计与验收记录；本文是状态快照。
+**M4b 的改动还在工作区，未提交**（同上：先 review 再提交）。
+改动清单：`docs/05` + `internal/engine/{lifecycle.go,engine.go}` + `internal/store/tasks_lifecycle.go`
++ `internal/server`（DELETE / stop）+ `internal/config` + `cmd/qinyuan/main.go` + 相应测试。
+`docs/00–05` 是设计与验收记录；本文是状态快照。
 
 **验证一切正常的三条命令**：
 
 ```powershell
-pwsh -File scripts/go.ps1 test ./... -count=1     # 58 个测试全绿
+pwsh -File scripts/go.ps1 test ./... -count=1     # 62 个测试全绿
 pwsh -File scripts/race.ps1 ./...                 # 零数据竞争
 pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo  # ✓ demo 通过
 ```

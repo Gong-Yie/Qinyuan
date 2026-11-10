@@ -49,6 +49,7 @@ type Config struct {
 	ContextWindowK    int // 上下文窗口（K tokens）：压缩用的估计值；0 = 关闭压缩
 	SettlementTurns   int // 撞预算后的收尾轮数（0 = 关闭）
 	SettlementTimeout time.Duration
+	MaxConcurrentRuns int // 同时跑的任务上限（0 = 不限）
 
 	LLM LLMConfig
 }
@@ -187,6 +188,13 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_SETTLEMENT_TIMEOUT_SECONDS 非法：%q（10..900）", v)
 		}
 		c.SettlementTimeout = time.Duration(n) * time.Second
+	}
+	if v, _ := pick("QINYUAN_MAX_CONCURRENT_RUNS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 100 {
+			return nil, fmt.Errorf("QINYUAN_MAX_CONCURRENT_RUNS 非法：%q（0=不限，1..100）", v)
+		}
+		c.MaxConcurrentRuns = n
 	}
 
 	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)

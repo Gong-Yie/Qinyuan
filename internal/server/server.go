@@ -49,6 +49,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs", s.handleListRuns)
 	mux.HandleFunc("POST /api/runs", s.handleCreateRun)
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("DELETE /api/runs/{id}", s.handleDeleteRun)
 	mux.HandleFunc("POST /api/runs/{id}/control", s.handleControl)
 	mux.HandleFunc("GET /api/runs/{id}/nodes", s.handleNodes)
 	mux.HandleFunc("GET /api/runs/{id}/intents", s.handleIntents)
@@ -165,6 +166,26 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleDeleteRun 删任务：屏障 → 排水 → 文件暂存 → DB 级联删 → 提交后真删。
+//
+// 与 pause 的区别：pause 可恢复、保留全部数据；delete 不可回退。
+// 幂等：已经在删/已经删掉都返回 200（调用方重试安全）。
+func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := s.Engine.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": false, "note": "任务不存在（视为已删除）"})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": true})
+}
+
 func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
 	if !ok {
@@ -181,18 +202,21 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch req.Action {
 	case "start":
-		err = s.Engine.Run(ctx, id)
+		err = s.Engine.Start(ctx, id)
 	case "pause":
 		err = s.Engine.Pause(ctx, id)
 	case "resume":
 		err = s.Engine.Resume(ctx, id)
 	case "stop":
-		// 终止是一条比暂停长得多的链（屏障 → 排水 → 两阶段清理），
-		// M1 不提供半成品语义：宁可明确拒绝，也不假装"停了"。
-		writeError(w, http.StatusNotImplemented, "stop 尚未实现（M4 的删除/终止流水线）；当前请用 pause")
-		return
+		// 钦原没有"停机保号"这个状态：stop 就是删除（屏障 → 排水 → 两阶段清理）。
+		// 想保留数据请用 pause（可恢复）。
+		err = s.Engine.Delete(ctx, id)
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "deleted"})
+			return
+		}
 	default:
-		writeError(w, http.StatusBadRequest, "action 只支持 pause/resume/stop")
+		writeError(w, http.StatusBadRequest, "action 只支持 start/pause/resume/stop（stop = 删除）")
 		return
 	}
 	if err != nil {
