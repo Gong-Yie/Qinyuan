@@ -49,6 +49,7 @@
 | M7 | 平台化七件套：trace / outbox / GraphStore+memstore / 战役 / 审批 SLA / 可复现报告 / 连接器（见 `docs/15`） | ✅（部分到 S1–S2，见该文 §0） |
 | M8 | 控制台补齐（战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批）+ P2-4 S3 DTO 迁移（`docs/16`） | ✅ |
 | M9 | 鉴权：Bearer 令牌（viewer/operator/admin）+ 会话 Cookie + CSRF + 登录限速 + 非回环必须有鉴权（`docs/17`） | ✅ |
+| M10 | 控制台「新建任务」表单 + `can_start`（created/queued 可一键启动，修复"建了但不动"）（`docs/16 §6`） | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。

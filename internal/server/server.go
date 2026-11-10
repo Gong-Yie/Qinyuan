@@ -531,6 +531,13 @@ func perFact(tokens int64, facts int) int64 {
 func runDTO(ctx context.Context, st *store.Store, run *model.Run) map[string]any {
 	activeIntent, _ := st.HasActiveIntent(ctx, run.ID)
 	status := model.DeriveStatus(run.Task, activeIntent, false)
+	// 派生状态把 "created" 显示成 idle（没有活可干），但按钮必须看**持久化状态**：
+	// 否则新建的任务既不显示"启动"、又错误地显示"暂停"。
+	persisted := ""
+	if run.Task != nil {
+		persisted = run.Task.Status
+	}
+	canStart := persisted == model.TaskCreated || (run.Task != nil && run.Task.Queued)
 	out := map[string]any{
 		"id":          run.ID,
 		"goal":        run.Goal,
@@ -540,8 +547,10 @@ func runDTO(ctx context.Context, st *store.Store, run *model.Run) map[string]any
 		"version":     run.Version,
 		"created_at":  run.CreatedAt.Unix(),
 		"updated_at":  run.UpdatedAt.Unix(),
-		"can_pause":   status == model.TaskRunning || status == "idle",
+		"can_pause":   !canStart && (status == model.TaskRunning || status == "idle"),
 		"can_resume":  status == model.TaskPaused,
+		// M10：created/queued 的任务在控制台要能一键启动（引擎侧 = admit → Run 或入队）。
+		"can_start": canStart,
 	}
 	if run.Task != nil {
 		out["name"] = run.Task.Name

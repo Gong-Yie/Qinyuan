@@ -403,6 +403,20 @@ function drawRuns() {
       <button class="btn" id="run-refresh">刷新</button>
     </div>
     <div class="card">
+      <div class="card-head"><h2 class="card-title">新建任务</h2>
+        <span class="muted">目标会按"最小范围"登记授权（URL / IP:端口 / 域名 / CIDR）；留空 = 只有目标文本</span></div>
+      <div class="card-body">
+        <div class="form-row">
+          <input class="search" id="new-goal" placeholder="目标（必填）：如 拿下 /flag；或 确认登录页是否有 SQL 注入" style="min-width:420px" />
+          <input class="search" id="new-target" placeholder="授权目标：http://靶机:8080/ 或 10.0.0.5 或 example.com" style="min-width:300px" />
+          <input class="search" id="new-workers" type="number" min="1" max="8" value="2" title="worker 数" style="min-width:80px" />
+          <input class="search" id="new-timeout" type="number" min="0" placeholder="超时秒(0=不限)" style="min-width:130px" />
+          <input class="search" id="new-name" placeholder="任务名（可选）" style="min-width:150px" />
+          <button class="btn btn-primary" id="new-create">创建并启动</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
       ${items.length ? `<table class="table">
         <thead><tr>
           <th>状态</th><th>目标</th><th class="num">轮次</th><th class="num">意图</th>
@@ -425,6 +439,8 @@ function drawRuns() {
     drawRuns._t = setTimeout(drawRuns, 180);
   });
   $('run-refresh').addEventListener('click', () => S.refresh && S.refresh());
+  const createBtn = $('new-create');
+  if (createBtn) createBtn.addEventListener('click', createRun);
 
   document.querySelectorAll('[data-run]').forEach((row) => {
     row.addEventListener('click', (ev) => {
@@ -450,6 +466,7 @@ function runRow(r) {
     <td class="muted">${fmtDate(r.created_at)}</td>
     <td class="muted">${ago(r.updated_at)}</td>
     <td class="actions">
+      ${r.can_start ? `<button class="btn btn-sm btn-primary" data-act="start" data-run="${r.id}">启动</button>` : ''}
       ${r.can_pause ? `<button class="btn btn-sm" data-act="pause" data-run="${r.id}">暂停</button>` : ''}
       ${r.can_resume ? `<button class="btn btn-sm" data-act="resume" data-run="${r.id}">恢复</button>` : ''}
       <button class="btn btn-sm" data-act="open" data-run="${r.id}">详情</button>
@@ -475,10 +492,39 @@ async function control(id, action) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action }),
     });
-    toast(action === 'pause' ? '已暂停' : '已恢复');
+    toast({ pause: '已暂停', resume: '已恢复', start: '已启动' }[action] || '已处理');
     if (S.refresh) await S.refresh();
     await pollGlobal();
   } catch (e) { toast('操作失败：' + e.message); }
+}
+
+// 新建任务：创建 + 启动（两步都要，否则任务只是躺在 created 状态）。
+async function createRun() {
+  const goal = $('new-goal').value.trim();
+  if (!goal) { toast('先写目标（goal 必填）'); return; }
+  const body = {
+    goal,
+    target: $('new-target').value.trim(),
+    name: $('new-name').value.trim(),
+    worker_count: Number($('new-workers').value) || 2,
+    timeout_seconds: Number($('new-timeout').value) || 0,
+  };
+  try {
+    const run = await api('/api/runs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    try {
+      await api(`/api/runs/${run.id}/control`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"action":"start"}',
+      });
+      toast(`任务 #${run.id} 已创建并启动`);
+    } catch (e) {
+      toast(`任务 #${run.id} 已创建，但启动失败：${e.message}`);
+    }
+    location.hash = `#/runs/${run.id}`;
+  } catch (e) {
+    toast('创建失败：' + e.message);
+  }
 }
 
 /* ── 任务详情 ────────────────────────────────────────── */
@@ -1256,7 +1302,8 @@ function openDrawerRaw(title, text) {
 /* ── M8：时间线 / 战役 / 运维 ───────────────────────── */
 
 function runActions(run, id) {
-  return `${run.can_pause ? '<button class="btn" data-act="pause">暂停</button>' : ''}
+  return `${run.can_start ? '<button class="btn btn-primary" data-act="start">启动</button>' : ''}
+    ${run.can_pause ? '<button class="btn" data-act="pause">暂停</button>' : ''}
     ${run.can_resume ? '<button class="btn" data-act="resume">恢复</button>' : ''}
     <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告 MD</a>
     <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report?format=html">HTML</a>

@@ -88,3 +88,22 @@ pwsh -File scripts/go.ps1 run ./cmd/qinyuan demo
 4. **CI 导出只写了脚本**，没有"把回归结果批量提交"的入口（单条有 `ci-result`）；
 5. **`agent` 仍 import `store`**（worker/planner 的写路径与事务强耦合）。要彻底解耦，下一步是把
    `AddIntent/AddFact/AddFinding` 的入参类型也搬进 model —— 那是 P2-4 S4，属于 P2-1 拆包的一部分。
+
+---
+
+## 6. 补充（M10）：控制台里「新建任务」
+
+M8 交付后，控制台仍然只能看不能建（建任务只能走 CLI/API），而新建的任务又停在 `created`，
+页面上没有任何按钮能启动它 —— 用户实际会卡在"建了但不动"。
+
+补了两块：
+
+1. 任务页顶部「新建任务」表单：目标（必填）+ 授权目标（URL / IP:端口 / 域名 / CIDR）+
+   worker 数 + 超时 + 任务名 → `POST /api/runs` 然后立刻 `POST /api/runs/{id}/control {"action":"start"}`；
+2. `can_start`：DTO 里按持久化状态（`created`/`queued`）给按钮，而不是派生显示状态
+   （`DeriveStatus` 会把 created 显示成 idle）。所以新建任务的按钮是「启动」而不是「暂停」。
+
+测试：`server.TestRunDTOCanStart`（created → can_start=true/can_pause=false；running → 反过来）。
+
+> 本机靶场注意：出网守卫默认拒绝 loopback（SSRF 防护），打 `127.0.0.1` 的靶场要
+> `QINYUAN_ALLOW_LOOPBACK=1` 重启 `serve`，否则每个 `http_request` 都会被拦。
