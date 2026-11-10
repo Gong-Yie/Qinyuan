@@ -7,6 +7,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -68,7 +69,72 @@ type Config struct {
 	// P3-3：外部连接器（空 = 不启用，行为与升级前一致）。
 	Connectors ConnectorConfig
 
+	// M9：HTTP 鉴权（空令牌 + 回环监听 = 开发态；监听非回环必须有令牌）。
+	Auth AuthConfig
+
 	LLM LLMConfig
+}
+
+// AuthConfig 是鉴权配置。
+//
+// Mode：
+//   - auto（默认）：配了令牌就启用，没配就关闭（仅允许回环监听）；
+//   - on：强制启用（没配令牌 = 启动失败）；
+//   - off：强制关闭（监听非回环 = 启动失败）。
+type AuthConfig struct {
+	Mode         string
+	TokenSpec    string
+	SessionTTL   time.Duration
+	CookieSecure bool
+}
+
+// Enabled 判断鉴权是否启用。
+func (a AuthConfig) Enabled() bool {
+	switch strings.ToLower(strings.TrimSpace(a.Mode)) {
+	case "on", "1", "true", "yes":
+		return true
+	case "off", "0", "false", "no":
+		return false
+	}
+	return strings.TrimSpace(a.TokenSpec) != ""
+}
+
+// ValidateServe 是启动前的安全自检：**监听非回环时必须启用鉴权**。
+//
+// 这是"默认拒绝"原则在部署面的延伸：一个能暂停任务、审批危险操作、导出攻击脚本的
+// 控制台，绝不能因为忘了配一个环境变量就裸奔在 0.0.0.0 上。
+func (c *Config) ValidateServe() error {
+	if c.Auth.Enabled() {
+		if strings.TrimSpace(c.Auth.TokenSpec) == "" {
+			return fmt.Errorf("QINYUAN_AUTH=on 但没有配置令牌（QINYUAN_AUTH_TOKEN / QINYUAN_AUTH_TOKENS）")
+		}
+		return nil
+	}
+	if !IsLoopbackAddr(c.Addr) {
+		return fmt.Errorf("监听 %q 不是回环地址，但鉴权未启用："+
+			"请配置 QINYUAN_AUTH_TOKEN=<随机长令牌>（或把监听地址改回 127.0.0.1）", c.Addr)
+	}
+	return nil
+}
+
+// IsLoopbackAddr 判断监听地址是否只对本机开放。
+//
+// 地址为空 / 端口前无 host / 0.0.0.0 / :: 都算"对外暴露"（不 loopback）。
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// 没有端口（或格式怪）：按 host 判断；"localhost" 之外一律保守拒绝。
+		host = strings.TrimSpace(addr)
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false // ":8787" = 所有网卡
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ConnectorConfig 是双向集成的外部端点（工单 / 资产回写）。
@@ -142,6 +208,10 @@ func Load() (*Config, error) {
 		ApprovalLowAction:   "allow",
 		ApprovalMidAction:   "deny",
 		ApprovalHighAction:  "deny",
+		Auth: AuthConfig{
+			Mode:       "auto",
+			SessionTTL: 12 * time.Hour,
+		},
 		LLM: LLMConfig{
 			Provider:    "fake",
 			BaseURL:     "https://api.openai.com/v1",
@@ -285,6 +355,29 @@ func Load() (*Config, error) {
 	}
 
 	c.LLM.Provider, _ = pick("QINYUAN_LLM_PROVIDER", fileVals, c.LLM.Provider)
+	// M9：鉴权（令牌只从 ENV/文件读，不进数据库、不进日志）。
+	c.Auth.Mode, _ = pick("QINYUAN_AUTH", fileVals, c.Auth.Mode)
+	// 两个变量都支持：单令牌（老/简单）与多令牌带角色（token:viewer,token2:admin）。
+	single, _ := pick("QINYUAN_AUTH_TOKEN", fileVals, "")
+	multi, _ := pick("QINYUAN_AUTH_TOKENS", fileVals, "")
+	switch {
+	case single != "" && multi != "":
+		c.Auth.TokenSpec = single + "," + multi
+	case single != "":
+		c.Auth.TokenSpec = single
+	default:
+		c.Auth.TokenSpec = multi
+	}
+	if v, _ := pick("QINYUAN_SESSION_TTL_HOURS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 168 {
+			return nil, fmt.Errorf("QINYUAN_SESSION_TTL_HOURS 非法：%q（1..168）", v)
+		}
+		c.Auth.SessionTTL = time.Duration(n) * time.Hour
+	}
+	if v, _ := pick("QINYUAN_COOKIE_SECURE", fileVals, ""); v == "1" {
+		c.Auth.CookieSecure = true
+	}
 	// P3-3：连接器端点（只在配置了 URL 时才启用；token 只从 ENV/文件读）。
 	c.Connectors.AssetsURL, _ = pick("QINYUAN_CONNECTOR_ASSETS_URL", fileVals, "")
 	c.Connectors.AssetsToken, _ = pick("QINYUAN_CONNECTOR_ASSETS_TOKEN", fileVals, "")

@@ -1,7 +1,10 @@
 # 构建产物
 *.exe
 *.exe~
-qinyuan
+# 只忽略**仓库根目录**的可执行文件。
+# 之前写成裸 `qinyuan`，把源码目录 `cmd/qinyuan/` 也吞掉了 —— 后果是全新 clone
+# 里没有 CLI 入口、根本编译不过（M9 提交时才发现）。
+/qinyuan
 /qinyuan.exe
 
 # 本地数据（含落盘的工具输出、证据）

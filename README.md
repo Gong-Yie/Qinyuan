@@ -6,8 +6,10 @@
 > M4b 再补上：**删除流水线**（屏障→排水→文件暂存→DB 级联→提交后真删）、**并发准入队列**（持久化 FIFO）、**完整启动恢复**（含暂存删除收尾）。
 > M4c 再补上：**流式输出**（SSE，`tool_calls` 按 index 合并）+ **committed 边界**（未提交才可重试，已提交绝不重放）+ TTFT 观测。
 > M5 再补上：**控制台**（`go:embed` 手写 SPA：目标/计划/意图｜活动带｜成本/覆盖/事实）与 **activity SSE**（任务级一条流、`Last-Event-ID` 从 DB 补齐、断线自动重连）。
-> M6 已全部完成。还没有：鉴权、批量复测/CI 集成（P3-3）。
+> M6 已全部完成；M7–M9 补上平台化能力（trace/outbox/战役/报告/连接器）、控制台新页面与**鉴权**。
+> 还没有：多用户/SSO、批量复测的任务化计划（CI 已能单条回写）。
 > 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)、[`15-M7-平台化七件套.md`](docs/15-M7-平台化七件套.md)、[`16-M8-控制台与DTO迁移.md`](docs/16-M8-控制台与DTO迁移.md)。
+> 设计与取舍见 [`docs/00-设计定稿.md`](docs/00-设计定稿.md)、[`01-M2-规划者与模型接入.md`](docs/01-M2-规划者与模型接入.md)、[`02-M3-计划图与覆盖度.md`](docs/02-M3-计划图与覆盖度.md)、[`03-M3.5-目标拆解与差分态势.md`](docs/03-M3.5-目标拆解与差分态势.md)、[`04-M4a-撞预算不白跑.md`](docs/04-M4a-撞预算不白跑.md)、[`05-M4b-删除与准入.md`](docs/05-M4b-删除与准入.md)、[`06-M4c-流式与committed.md`](docs/06-M4c-流式与committed.md)、[`11-M5-控制台.md`](docs/11-M5-控制台.md)、[`15-M7-平台化七件套.md`](docs/15-M7-平台化七件套.md)、[`16-M8-控制台与DTO迁移.md`](docs/16-M8-控制台与DTO迁移.md)、[`17-M9-鉴权.md`](docs/17-M9-鉴权.md)。
 > **新接手（人或 AI）请先读 [`HANDOFF.md`](HANDOFF.md)**：环境、状态机、已修缺陷、扩展指南都在那里。
 
 ---
@@ -57,6 +59,17 @@ go run ./cmd/qinyuan migrate        # 幂等迁移，可反复执行
 go run ./cmd/qinyuan demo           # 端到端演示：假目标 + 假模型，不联网
 go run ./cmd/qinyuan serve          # HTTP API：127.0.0.1:8787
 ```
+
+只想本机用：`serve` 默认只监听 `127.0.0.1`，不需要令牌。
+**要监听 `0.0.0.0`（或任何非回环地址）必须先配令牌，否则会拒绝启动**：
+
+```powershell
+$env:QINYUAN_AUTH_TOKEN = "<32+ 字符随机串>"     # 单令牌（admin）
+# 或分角色：$env:QINYUAN_AUTH_TOKENS = "读令牌:viewer,操作令牌:operator,管理令牌:admin"
+go run ./cmd/qinyuan serve --addr 0.0.0.0:8787
+```
+
+详见 [`docs/17-M9-鉴权.md`](docs/17-M9-鉴权.md)。
 
 `demo` 会自检并打印：
 
@@ -174,6 +187,8 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 - **出网守卫**：拨号层拒绝 loopback / 链路本地（含 `169.254.169.254`）/ 组播 / 未指定；**不拒绝 RFC1918**（内网自建服务是合法用法，这是刻意取舍）。
 - **重定向**：只允许同主机，≥5 次拒绝（凭据常在 URL 里）。
 - **证据门槛**：`fact` 必须有 `evidence`；`finding` 必须有可复现证据，否则只能记 `inferred` 事实。
+- **鉴权（M9）**：HTTP 层默认只监听回环；一旦监听非回环**必须有令牌**（否则拒绝启动）。
+  令牌分 `viewer/operator/admin` 三角色，控制台走会话 Cookie + CSRF 双提交；改审批策略必须是 admin。
 - `QINYUAN_ALLOW_LOOPBACK=1` 只在 demo/自测用，它会削弱 SSRF 防护。
 
 > 钦原只应在**获得明确授权**的目标上使用。范围闸门是工具，不是法律许可。
@@ -197,6 +212,7 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M6c~~ ✅ | finding 复测（重放+断言）+ Markdown 报告 | 三种 finding 分别 verified/failed/unverifiable；报告带可执行 curl |
 | ~~M7~~ ✅ | 平台化七件套：trace 时间线 / outbox / 可插拔 GraphStore / 战役视图 / 审批 SLA / 可复现报告 / 双向集成（`docs/15`） | 时间线能还原"轮→意图→工具"；推 5 次只手 1 个单；报告 zip 自包含 |
 | ~~M8~~ ✅ | 控制台补齐：战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批 + P2-4 S3 DTO 迁移（`docs/16`） | 浏览器实测六页；`graphstore` 不再依赖 `store`；146 用例 + `-race` 全绿 |
+| ~~M9~~ ✅ | 鉴权：Bearer 令牌（viewer/operator/admin）+ 会话 Cookie + CSRF + 登录限速 + 非回环必须有鉴权（`docs/17`） | 无凭据 401；viewer 写 403；CSRF 缺失 403；`0.0.0.0` 无令牌拒绝启动；156 用例全绿 |
 
 ---
 

@@ -67,6 +67,7 @@
     </div>
     <div class="topbar-actions">
       <span id="engine-chip" class="chip chip-quiet" title="模型与引擎">—</span>
+      <button class="btn btn-ghost" id="auth-logout" type="button" title="退出登录" hidden>退出</button>
       <button class="btn btn-ghost" id="btn-theme" type="button" title="切换主题">◐</button>
       <button class="btn" id="btn-refresh" type="button">刷新</button>
     </div>
@@ -84,6 +85,16 @@
 </div>
 
 <div id="toast" class="toast" hidden></div>
+
+<div id="login" class="login-mask" hidden>
+  <div class="login-card">
+    <div class="login-brand">钦原 · 控制台</div>
+    <p class="login-hint" id="login-hint">需要访问令牌（服务端 QINYUAN_AUTH_TOKEN）</p>
+    <input class="search" id="login-token" type="password" placeholder="访问令牌" autocomplete="current-password" />
+    <button class="btn btn-primary" id="login-btn" type="button">登录</button>
+    <div class="login-err" id="login-err" hidden></div>
+  </div>
+</div>
 
 <script src="/graph.js"></script>
 <script src="/app.js"></script>

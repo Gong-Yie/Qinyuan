@@ -36,6 +36,7 @@ const S = {
   refresh: null,
   cleanup: null,
   sig: {},
+  authed: false,
 };
 
 /* ── 小工具 ─────────────────────────────────────────── */
@@ -79,12 +80,80 @@ const STATUS_LABEL = {
 const statusBadge = (st) => `<span class="badge badge-${st === 'created' ? 'idle' : st || 'idle'}">${STATUS_LABEL[st] || st || '未知'}</span>`;
 
 async function api(path, init) {
+  init = init || {};
+  const method = String(init.method || 'GET').toUpperCase();
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    // M9：cookie 会话的写请求必须带 CSRF 双提交头（服务端会比对 qy_csrf cookie）。
+    init.headers = Object.assign({ 'X-CSRF-Token': csrfToken() }, init.headers || {});
+  }
   const res = await fetch(path, init);
   const text = await res.text();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
+  if (res.status === 401) {
+    showLogin('登录已过期，请重新登录');
+    throw new Error('未登录');
+  }
   if (!res.ok) throw new Error((body && body.error) || `HTTP ${res.status}`);
   return body;
+}
+
+// ---------- M9：登录态 ----------
+
+function csrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)qy_csrf=([^;]*)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+function showLogin(msg) {
+  S.authed = false;
+  const mask = $('login');
+  if (!mask) return;
+  mask.hidden = false;
+  if (msg) $('login-hint').textContent = msg;
+  const err = $('login-err');
+  err.hidden = true;
+  setTimeout(() => $('login-token').focus(), 30);
+}
+
+function hideLogin() {
+  const mask = $('login');
+  if (mask) mask.hidden = true;
+}
+
+async function doLogin() {
+  const token = $('login-token').value.trim();
+  const err = $('login-err');
+  if (!token) { err.textContent = '请输入令牌'; err.hidden = false; return; }
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      err.textContent = body.error || `登录失败（HTTP ${res.status}）`;
+      err.hidden = false;
+      return;
+    }
+    $('login-token').value = '';
+    hideLogin();
+    S.authed = true;
+    $('auth-logout').hidden = false;
+    await pollGlobal();
+    await route();
+  } catch (e) {
+    err.textContent = '登录请求失败：' + e.message;
+    err.hidden = false;
+  }
+}
+
+async function doLogout() {
+  try {
+    await fetch('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken() } });
+  } catch { /* 忽略：本地刷新即可 */ }
+  location.reload();
 }
 
 function toast(msg) {
@@ -159,6 +228,7 @@ function parseHash() {
 }
 
 async function route() {
+  if (!S.authed) { showLogin('需要登录后才能使用控制台'); return; }
   if (S.cleanup) { S.cleanup(); S.cleanup = null; }
   if (S.es) { S.es.close(); S.es = null; }
   S.refresh = null;
@@ -1655,13 +1725,40 @@ function esc(s) {
     S.stickBottom = v.scrollHeight - v.scrollTop - v.clientHeight < 120;
   });
 
+  // M9：登录 / 登出
+  $('login-btn').addEventListener('click', doLogin);
+  $('login-token').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+  $('auth-logout').addEventListener('click', doLogout);
+
   window.addEventListener('hashchange', route);
-  pollGlobal();
-  route();
+
+  start();
 
   setInterval(() => {
+    if (!S.authed) return;
     pollGlobal();
     if (S.refresh) S.refresh();
   }, 5000);
 })();
+
+// start 先确认身份：未认证只显示登录卡片，不去拉任何业务数据。
+async function start() {
+  try {
+    const res = await fetch('/api/me');
+    if (res.status === 401) {
+      showLogin('需要登录后才能使用控制台');
+      return;
+    }
+    const me = await res.json().catch(() => ({}));
+    S.authed = true;
+    // 服务端没启用鉴权（回环开发态）时，不显示"退出"按钮。
+    $('auth-logout').hidden = !me.auth;
+    hideLogin();
+  } catch (e) {
+    showLogin('无法连接后端：' + e.message);
+    return;
+  }
+  await pollGlobal();
+  await route();
+}
 

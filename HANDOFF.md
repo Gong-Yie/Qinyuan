@@ -48,6 +48,7 @@
 | M6c | finding 复测（重放+断言，三档结论）+ Markdown 报告 | ✅ |
 | M7 | 平台化七件套：trace / outbox / GraphStore+memstore / 战役 / 审批 SLA / 可复现报告 / 连接器（见 `docs/15`） | ✅（部分到 S1–S2，见该文 §0） |
 | M8 | 控制台补齐（战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批）+ P2-4 S3 DTO 迁移（`docs/16`） | ✅ |
+| M9 | 鉴权：Bearer 令牌（viewer/operator/admin）+ 会话 Cookie + CSRF + 登录限速 + 非回环必须有鉴权（`docs/17`） | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -148,6 +149,11 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_APPROVAL_{LOW,MID,HIGH}_ACTION` | `allow` / `deny` / `deny` | 分级超时动作 |
 | `QINYUAN_CONNECTOR_ASSETS_URL` / `_TOKEN` | 空 | 资产回写端点（空 = 不启用连接器） |
 | `QINYUAN_CONNECTOR_TICKET_URL` / `_TOKEN` | 空 | 工单端点（空 = 不启用） |
+| `QINYUAN_AUTH` | `auto` | `auto`（有令牌就启用）/ `on` / `off`；见 `docs/17` |
+| `QINYUAN_AUTH_TOKEN` | 空 | 单令牌（默认 admin）；**监听非回环时必填** |
+| `QINYUAN_AUTH_TOKENS` | 空 | 多令牌带角色：`tok:viewer,tok2:operator,tok3:admin` |
+| `QINYUAN_SESSION_TTL_HOURS` | `12` | 会话时长（1..168）；会话在内存，重启即全员登出 |
+| `QINYUAN_COOKIE_SECURE` | `0` | 反代 + HTTPS 时设 1（会话 cookie 只走 TLS） |
 
 ---
 
@@ -166,7 +172,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 05-M4b-删除与准入.md
 │   ├── 06-M4c-流式与committed.md
 │   ├── 15-M7-平台化七件套.md    trace / outbox / GraphStore / 战役 / 审批SLA / 报告 / 连接器
-│   └── 16-M8-控制台与DTO迁移.md  战役页 / 运维页 / 时间线 Tab / 批量审批 / DTO 迁 model
+│   ├── 16-M8-控制台与DTO迁移.md  战役页 / 运维页 / 时间线 Tab / 批量审批 / DTO 迁 model
+│   └── 17-M9-鉴权.md           令牌/角色 / Cookie 会话 / CSRF / 登录限速 / 启动自检
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -690,7 +697,8 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 
 - SSE + 前端（Next.js 静态导出 + `go:embed`）；链路图/覆盖图；
 - 审批门（规则 → LLM 判官 → 人工卡片）、流量录制（MITM）、finding 复测（PoC 可复现）、报告；
-- 鉴权：`serve` 目前只监听 127.0.0.1，**没有 token**，是开发用。
+- 鉴权：M9 已补（`internal/auth`，见 `docs/17`）。默认 `auto`：配了令牌就启用；监听非回环却没配令牌
+  会**拒绝启动**。会话在内存（重启即全员登出），目前没有多用户/SSO。
 
 ---
 
@@ -823,6 +831,12 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
     会让该事件永远不再推（`connectors.Fanout.Handle` 里判 status）。
 57. **中文引号别写进 Go 字符串**（坑 #52 的复现点：报告模板）：用「」或转义。
 58. **SSE 广播别走 outbox**：广播要低延迟且可丢；outbox 只处理"必须恰好一次"的副作用。
+59. **中间件顺序**：鉴权必须包在日志外层之内、且**在所有业务路由之前**；把 `Auth.Middleware`
+    套在 `mux` 外面（本仓库是 `withMiddleware(Auth.Middleware(mux))`），别指望每个 handler 自己查。
+60. **CSRF 只对 cookie 会话生效**：Bearer 调用不该被 CSRF 挡（CI/脚本没有 cookie）；
+    双提交要把 `qy_csrf` cookie 做成**可读**（HttpOnly 会让前端取不到值）。
+61. **登录限速要按 IP 且在失败分支计数**：只在成功路径清零；否则"爆破到对为止"就变成无限试。
+62. **别把令牌写进日志**：`buildAuth` 只打令牌数量与角色分布；`/health` 也不含任何凭据。
 
 ---
 
@@ -861,6 +875,9 @@ approval_policies+grants / campaigns+campaign_scope / connector_deliveries；
 **M8 已提交**：控制台新增战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批；
 `Coverage/PlanGraph/StepView/CampaignView` 类型迁到 `internal/model/views.go`（store 里留别名），
 `graphstore` 不再 import `store`（断言挪到 `store/graphstore_assert.go`）。见 `docs/16`。
+**M9 已提交**：`internal/auth`（令牌/角色/会话/CSRF/限速）+ `config.ValidateServe`（非回环必须有鉴权）
++ 控制台登录卡片与 401 处理。**监听 0.0.0.0 却忘配令牌会直接拒绝启动**——这是刻意的，
+部署时先配 `QINYUAN_AUTH_TOKEN` 再改监听地址。见 `docs/17`。
 
 `docs/00–15` 是设计与验收记录；本文是状态快照。
 
@@ -882,4 +899,5 @@ pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/
 3. **`expectedMatches` 的匹配规则**（中文 2-gram + 60% 覆盖）是否够准；太松会假完成，太紧会一直等人。
 4. **`add_intent` 强制 `step_id`** 是否会让 planner 为了过校验硬凑步骤。
 5. **许可证**：当前 MIT；如果将来要复用 ARTEX/norma 的任何代码，必须先停下来讨论 AGPL 传染问题。
-6. **生产形态**：PG 是继续便携实例还是独立实例；是否需要鉴权/多用户；部署目标（单二进制 + 反代）。
+6. **生产形态**：PG 是继续便携实例还是独立实例；是否需要**多用户/SSO**（鉴权已有，见 `docs/17`）；
+   部署目标（单二进制 + 反代）。

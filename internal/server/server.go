@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"qinyuan/internal/agent"
+	"qinyuan/internal/auth"
 	"qinyuan/internal/connectors"
 	"qinyuan/internal/engine"
 	"qinyuan/internal/llm"
@@ -38,6 +39,8 @@ type Server struct {
 	LLMConfigured bool
 	// Connectors 是 P3-3 的外部集成扇出（nil = 未启用）。
 	Connectors *connectors.Fanout
+	// Auth 是 M9 的鉴权层（nil = 未启用；New 会给一个 Disabled 的实例）。
+	Auth *auth.Authenticator
 }
 
 // New 构造。
@@ -56,7 +59,7 @@ func New(st *store.Store, eng *engine.Engine, log *slog.Logger) *Server {
 			real = true
 		}
 	}
-	return &Server{Store: st, Engine: eng, Log: log, Bus: bus, LLMConfigured: real}
+	return &Server{Store: st, Engine: eng, Log: log, Bus: bus, LLMConfigured: real, Auth: auth.Disabled()}
 }
 
 // Handler 返回路由表。
@@ -66,6 +69,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
+	// M9：鉴权（登录/登出/身份）。登录与登出本身是公开路径（见 auth.IsPublicPath）。
+	mux.HandleFunc("POST /api/login", s.Auth.Login)
+	mux.HandleFunc("POST /api/logout", s.Auth.Logout)
+	mux.HandleFunc("GET /api/me", s.Auth.Me)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/findings", s.handleFindings)
 	mux.HandleFunc("GET /api/assets", s.handleEntities)
@@ -128,7 +135,8 @@ func (s *Server) Handler() http.Handler {
 	// 控制台静态资源（go:embed）。必须放在最后：`GET /` 会兜住所有非 API 路径。
 	mux.Handle("GET /", s.staticHandler())
 
-	return withMiddleware(mux, s.Log)
+	// 鉴权在日志外层之内：这样 401/403 也会进访问日志（审计需要"谁被挡了"）。
+	return withMiddleware(s.Auth.Middleware(mux), s.Log)
 }
 
 func withMiddleware(next http.Handler, log *slog.Logger) http.Handler {
