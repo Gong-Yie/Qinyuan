@@ -93,10 +93,16 @@ func BuildWorkerSystem(in WorkerPromptInput) string {
 			strings.Join(in.Run.Seeds, "、") + "\n")
 	}
 
-	// 中间产物规约：代码所有。
-	b.WriteString("\n【中间产物输出规约】脚本、payload、抓到的响应体等一切中间产物，一律写到本任务工作目录 ")
-	b.WriteString(in.RunDir)
-	b.WriteString(" —— 不要写 /tmp、不要用其它绝对路径。\n")
+	// 能力边界：这句话必须与真实工具面一致。以前这里写"把脚本/payload 写到工作目录"，
+	// 但 worker 没有写文件/执行工具，模型只能做到"说"，于是被 planner 派去解包/反编译
+	// （run #41 连派 5 次，全部空跑，见 docs/19）。
+	b.WriteString("\n【能力边界（与工具面一致，不要越界假设）】\n")
+	b.WriteString("- 你**没有** shell，不能执行命令、不能解压、不能反编译、不能写文件；\n")
+	b.WriteString("- 超过上限的工具输出会由系统自动落盘到 " + in.RunDir +
+		"，你只拿到 head + 路径（路径只用于引用，不能再读）；\n")
+	b.WriteString("- 附件只能用 list_attachments / read_attachment 按字节读：文本回正文，二进制/压缩包回 hexdump；\n")
+	b.WriteString("  不要试图在推理里逐字节解析几万字节的 hexdump —— 那会烧光输出预算且几乎无法还原结构；\n")
+	b.WriteString("- 需要「解包 / 反编译 / 跑脚本」才能拿到的结论，本任务目前做不到：改为黑盒探测，并在 fact 里点明这个缺口。\n")
 
 	if in.TrafficEnabled {
 		b.WriteString("\n【流量工具】本任务开启了流量录制（每次 http_request 都会留下请求/响应，" +
@@ -156,8 +162,9 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
    - 在 recent_done 里出现过 → 看它的 state 分辨怎么停的：
      · done（正常跑完）：已覆盖，不原样重派；仅出现【材料性新机理】才重派，且 summary 要写清与上次的不同。
      · exhausted（撞预算，只写回部分）/ blocked（模型或网络失败，基本没探成）：
-       先用 get_worker_output 看它做到哪、卡在哪，再决定：接近突破被预算掐 → 派"接上次进度继续"；
-       纯外部故障 → 直接重派同方向；每次卡同一处 → 换打法。
+        先用 get_worker_output 看它做到哪、卡在哪（state / reason / last_error），再决定：
+        接近突破被预算掐 → 派"接上次进度继续"；last_error 是网关/网络抖动 → 可原样重派一次；
+        last_error 说明"工具面做不到"（要解包/执行/反编译）或同一处已卡两次 → 换打法，别再派同一招。
    - 完全无意图覆盖的全新方向 → 生成。
    - 深度优先于覆盖度：发现高价值入口后优先往深打穿，而不是为拉平覆盖度铺广。
    - 多样性永远服从【操作约束】：被约束排除的方向绝不生成。
@@ -204,7 +211,14 @@ func BuildPlannerSystem(run *model.Run, constraints []model.Constraint, scopes s
 		}
 	}
 
-	b.WriteString("\n【中间产物输出规约】脚本、payload、抓到的响应体等一切中间产物，一律写在本任务工作目录；不要写 /tmp。\n")
+	// 能力边界必须与真实工具面一致：planner 自己不执行，worker 也没有 shell。
+	// 以前这里写"脚本/payload 一律写到工作目录"，planner 就据此派了"解包 + 反编译"
+	// 这种执行者根本做不到的活（run #41 连派 5 次，见 docs/19）。
+	b.WriteString("\n【能力边界（写意图前必须据此裁剪）】\n")
+	b.WriteString("- worker 没有 shell：不能解压、不能执行脚本、不能反编译、不能写文件；\n")
+	b.WriteString("- 附件只能用 list_attachments / read_attachment 按字节读（二进制给 hexdump，单次 ≤64KB）；\n")
+	b.WriteString("  题目材料是 zip/war/jar 时，不要派「解包 + 反编译」：改为黑盒探测，或让用户上传已解压的文本；\n")
+	b.WriteString("- 不要写「先把中间产物写到工作目录」这类计划：模型写不了文件，执行者只会空跑。\n")
 	return b.String()
 }
 
@@ -377,7 +391,8 @@ func BuildGoalsSystem(run *model.Run, scopes string) string {
 先 add_scope（如有）→ set_constraints（如有）→ set_goals（必须）。
 完成后用一句话说明：拆出了几条目标、登记了几条约束与范围，然后停止调用工具。
 `)
-	b.WriteString("\n【中间产物输出规约】本次不需要写文件；若确需临时数据，写到任务工作目录，不要写 /tmp。\n")
+	b.WriteString("\n【能力边界】你只负责拆目标：不执行、不读附件正文、不写文件（也没有这些工具）。" +
+		"拆出来的目标要能被 worker 现有工具面证明（HTTP 请求、流量检索、附件按字节读）。\n")
 	return b.String()
 }
 

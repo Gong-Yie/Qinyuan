@@ -112,6 +112,68 @@ func TestMarkStepDone(t *testing.T) {
 	}
 }
 
+// run #41 的回归：步骤派给意图 A 之后，意图 B 的黑盒探测事实不能把它判成 done。
+//
+// 真实事故：step#276 要求"展开 ROOT.war 并清点 WEB-INF"，被事实 #283 满足，
+// 而 #283 的内容是"GET /WEB-INF/web.xml → 404" —— 同一个路径名出现在探测记录里。
+func TestStepSatisfiedOnlyByItsOwnIntent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	run := newTestRun(t, s)
+
+	stepID, err := s.AddStep(ctx, AddStepInput{
+		RunID: run.ID, Text: "离线解包并清点 WEB-INF",
+		ExpectedEvidence: "WEB-INF/web.xml；ROOT.war；Dockerfile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.AddIntent(ctx, AddIntentInput{RunID: run.ID, Summary: "离线白盒：解包 ROOT.war"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LinkStepIntent(ctx, run.ID, stepID, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	// 另一条意图（黑盒）的探测记录：同样的路径名，但结论是 404。
+	other, err := s.AddIntent(ctx, AddIntentInput{RunID: run.ID, Summary: "黑盒探测非 /api 面"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeText := "未知路径都落到 mvc-dispatcher；GET /WEB-INF/web.xml -> 404；GET /ROOT.war -> 404"
+	factB, err := s.AddFact(ctx, AddFactInput{
+		RunID: run.ID, IntentID: other, Summary: "未知路径一律 404（mvc-dispatcher 回显）",
+		Evidence: probeText, Confidence: "observed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	satisfied, err := s.SatisfyStepsByFact(ctx, run.ID, factB, probeText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(satisfied) != 0 {
+		t.Fatalf("旁证不该完成已派工的步骤，实际命中 %v", satisfied)
+	}
+
+	// 派出去的那条意图自己产出的事实才算。
+	factA, err := s.AddFact(ctx, AddFactInput{
+		RunID: run.ID, IntentID: owner, Summary: "ROOT.war 内含 WEB-INF/web.xml 与 Dockerfile",
+		Evidence: "unzip -l ROOT.war → WEB-INF/web.xml；Dockerfile", Confidence: "observed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	satisfied, err = s.SatisfyStepsByFact(ctx, run.ID, factA, "ROOT.war 内含 WEB-INF/web.xml 与 Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(satisfied) != 1 || satisfied[0] != stepID {
+		t.Fatalf("本意图的事实应当完成步骤 %d，实际 %v", stepID, satisfied)
+	}
+}
+
 // 覆盖度：只认 fact 的锚点，origin fact 不算"测过"。
 func TestCoverageCountsOnlyFacts(t *testing.T) {
 	s := newTestStore(t)

@@ -165,6 +165,10 @@ func backoff(attempt int) time.Duration {
 }
 
 func retryable(err error) bool {
+	// "只有推理没有正文"不是抖动：重放同样的输入与预算只会再撞一次。
+	if errors.Is(err, ErrReasoningOnly) {
+		return false
+	}
 	return errors.Is(err, ErrRateLimited) || errors.Is(err, ErrTransient)
 }
 

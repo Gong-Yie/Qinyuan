@@ -55,6 +55,10 @@ const (
 	RelYields      = "yields"
 	RelProves      = "proves"
 	RelCovers      = "covers"
+	// M3 计划图的三条边（与 schema.sql 的 ck_edge_rel 一致）。
+	RelSatisfies  = "satisfies"
+	RelRealizedBy = "realized_by"
+	RelDependsOn  = "depends_on"
 )
 
 // 任务业务状态。

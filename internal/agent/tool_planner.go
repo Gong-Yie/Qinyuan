@@ -236,9 +236,11 @@ func NewListFactsTool() *Tool {
 // NewGetWorkerOutputTool 让 planner 判断"这条意图到底做出了什么"。
 func NewGetWorkerOutputTool() *Tool {
 	return &Tool{
-		Name:        "get_worker_output",
-		Description: `取某条意图最后一段输出（≤800 字）。用于判断它是正常跑完、还是被预算掐断。`,
-		ReadOnly:    true,
+		Name: "get_worker_output",
+		Description: `取一条意图的结论（不是只看正文）：state / reason / 回合数 / 产出计数 / 最后一条错误 / 最后一段输出。
+用于判断它是正常跑完（done）、被预算掐断（exhausted）、还是模型或网络失败（blocked + last_error）。
+⚠️ blocked 且 last_error 指向"模型/网关"时，重派同方向大概率还是同样结果：先换打法或换材料。`,
+		ReadOnly: true,
 		Schema: toolSpecJSON(`{
   "type": "object",
   "properties": {"intent_id": {"type": "integer"}},
@@ -255,12 +257,25 @@ func NewGetWorkerOutputTool() *Tool {
 			if err != nil {
 				return Errorf("读输出失败：%v", err), nil
 			}
+			v, err := rc.Store.IntentVerdict(ctx, rc.RunID, in.IntentID)
+			if err != nil {
+				return Errorf("读意图结论失败：%v", err), nil
+			}
 			trimmed := model.TrimSummary(out, 800)
-			return JSONResult(map[string]any{
+			payload := map[string]any{
 				"intent_id": in.IntentID,
+				"state":     v.State,
+				"reason":    v.Reason,
+				"turns":     v.Turns,
+				"facts":     v.Facts,
+				"findings":  v.Findings,
 				"output":    trimmed,
 				"truncated": len([]rune(out)) > 800,
-			}), nil
+			}
+			if v.LastError != "" {
+				payload["last_error"] = v.LastError
+			}
+			return JSONResult(payload), nil
 		},
 	}
 }

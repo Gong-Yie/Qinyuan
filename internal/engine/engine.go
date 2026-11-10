@@ -996,7 +996,20 @@ func (e *Engine) settle(ctx context.Context, runID, intentID int64, out *agent.O
 	case run != nil && run.Task != nil && model.IsTerminalTaskState(run.Task.Status):
 		next = model.StateStopped
 	case out.Err != nil:
-		next = model.StateBlocked
+		// 一次"网关抖了"不该让整条方向永久 blocked：worker 什么都没写回时，
+		// 把它放回队列重试一次；第二次仍失败才 blocked。
+		// "只有推理没有正文"（llm.ErrReasoningOnly）不是抖动，不会走到这里。
+		if out.Facts == 0 && out.Findings == 0 && isTransientLLMError(out.Err) &&
+			e.transientRetryAllowed(writeCtx, runID, intentID) {
+			next = model.StateOpen
+			e.emit(writeCtx, &model.Activity{
+				RunID: runID, NodeID: &intentID, Worker: "system", Kind: model.ActSystem,
+				Summary: "模型/网络偶发失败（尚未写回任何事实）：意图放回队列重试一次",
+				Detail:  out.Err.Error(),
+			})
+		} else {
+			next = model.StateBlocked
+		}
 	case out.Reason == agent.ReasonMaxTurns || out.Reason == agent.ReasonTimeout:
 		next = model.StateExhausted
 	default:
@@ -1016,6 +1029,25 @@ func (e *Engine) settle(ctx context.Context, runID, intentID int64, out *agent.O
 		_ = e.Store.SetBlockedReason(writeCtx, runID, intentID, "quota")
 	}
 	return next
+}
+
+// transientRetryLimit 一条意图最多因"偶发模型/网络失败"重排队几次。
+const transientRetryLimit = 1
+
+// isTransientLLMError 判断是不是"重跑一次大概率能过"的失败。
+// ErrReasoningOnly 不是 ErrTransient（推理吃光输出预算，重放必然再撞），所以不会命中。
+func isTransientLLMError(err error) bool {
+	return errors.Is(err, llm.ErrTransient) || errors.Is(err, llm.ErrRateLimited)
+}
+
+// transientRetryAllowed 读这条意图历史失败次数（含本次）判断还能不能再试一次。
+func (e *Engine) transientRetryAllowed(ctx context.Context, runID, intentID int64) bool {
+	n, err := e.Store.CountIntentTransientFailures(ctx, runID, intentID)
+	if err != nil {
+		e.Log.Warn("读偶发失败次数失败（按不放行处理）", "run", runID, "intent", intentID, "err", err)
+		return false
+	}
+	return n <= transientRetryLimit
 }
 
 // ---------- 通知与触发 ----------

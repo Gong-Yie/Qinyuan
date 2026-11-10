@@ -167,6 +167,73 @@ func TestOpenAIStreamRetriesBeforeCommit(t *testing.T) {
 	}
 }
 
+// 只有推理、没有正文（推理把 max_tokens 吃光）：不可重试，错误里要带现场。
+//
+// 实测见 docs/19：deepseek-flash 对 1KB hexdump 做结构分析时，
+// 4096 个输出 token 全部花在 reasoning 上，正文 0 字节、无工具调用。
+func TestOpenAIStreamReasoningOnlyIsNotRetried(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"reasoning_content":"先分析一下这 1024 字节…"}}]}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[],"usage":{"prompt_tokens":2220,"completion_tokens":4096,"completion_tokens_details":{"reasoning_tokens":4096}}}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	p := newTestProvider(t, srv.URL, 2) // 即使允许重试，也不该重试
+
+	resp, err := p.Stream(context.Background(), &Request{
+		Messages: []Message{{Role: RoleUser, Text: "分析这段 hex"}},
+	}, nil)
+	if !errors.Is(err, ErrReasoningOnly) {
+		t.Fatalf("应当是 ErrReasoningOnly，实际 %v", err)
+	}
+	if errors.Is(err, ErrTransient) {
+		t.Fatalf("推理吃光预算不是抖动，不该被当成 ErrTransient：%v", err)
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Fatalf("不该重试（请求数 %d）", n)
+	}
+	if resp == nil || resp.Thinking == "" {
+		t.Fatalf("必须保留已收到的推理，实际 %+v", resp)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "max_tokens") || !strings.Contains(msg, "4096") {
+		t.Fatalf("错误里要带输出预算，实际 %q", msg)
+	}
+}
+
+// 真·空流：200 但一个内容事件都没有。可重试，且错误里要能看出"零字节/只有 [DONE]"。
+func TestOpenAIStreamEmptyStreamDiagnostics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	p := newTestProvider(t, srv.URL, 0)
+
+	_, err := p.Stream(context.Background(), &Request{
+		Messages: []Message{{Role: RoleUser, Text: "hi"}},
+	}, nil)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("空流仍应是可重试的 ErrTransient，实际 %v", err)
+	}
+	var es *EmptyStreamError
+	if !errors.As(err, &es) {
+		t.Fatalf("应当是 *EmptyStreamError，实际 %T", err)
+	}
+	if !es.OnlyDone || es.Status != http.StatusOK {
+		t.Fatalf("现场字段不对：%+v", es)
+	}
+	if !strings.Contains(err.Error(), "只有 [DONE]") {
+		t.Fatalf("错误里要说清是哪种空，实际 %q", err)
+	}
+}
+
 // 非 200：走错误分类，不进 committed。
 func TestOpenAIStreamQuotaNoRetry(t *testing.T) {
 	var hits int32

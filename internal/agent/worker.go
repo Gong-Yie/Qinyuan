@@ -214,6 +214,18 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 					Detail:  err.Error(),
 				})
 			}
+			// 每一次模型失败都留一条可读记录：否则 planner 通过 get_worker_output
+			// 只能看到一句"执行结束：error"、output 为空，就不知道是"没探成"还是"做不了"，
+			// 于是把同一个方向反复重派（run #41 就这样重派了 5 次白盒）。
+			// 暂停/取消导致的 ctx 错误不算"模型失败"，别误导 planner。
+			if execCtx.Err() == nil {
+				emit(context.WithoutCancel(ctx), &model.Activity{
+					RunID: runID, NodeID: &intentID, Worker: owner, Kind: model.ActSystem,
+					Summary:  fmt.Sprintf("模型调用失败（第 %d 回合）：%s", turn, model.TrimSummary(oneLine(err.Error()), 160)),
+					Detail:   err.Error(),
+					Metadata: map[string]any{"llm_error": true, "turn": turn},
+				})
+			}
 			if execCtx.Err() != nil {
 				out.Reason = reasonForCtx(ctx, execCtx)
 			} else {

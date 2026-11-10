@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,6 +47,9 @@ type oaStreamChunk struct {
 		PromptTokensDetails struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -73,6 +77,13 @@ func (o *OpenAI) Stream(ctx context.Context, req *Request, onEvent func(StreamEv
 			return resp, nil
 		}
 		lastErr = err
+		if errors.Is(err, ErrReasoningOnly) {
+			// 推理吃光预算：同样的请求重放只会再撞一次，直接把现场交回上层。
+			if resp == nil {
+				resp = &Response{Provider: "openai", Model: o.cfg.Model}
+			}
+			return resp, err
+		}
 		if committed {
 			// 已经吐过内容：绝不重放（否则用户会看到两遍）。
 			if resp == nil {
@@ -120,6 +131,7 @@ func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(Strea
 		httpReq.Header.Set("Authorization", "Bearer "+o.cfg.APIKey)
 	}
 
+	start := time.Now()
 	resp, err := o.client.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -139,6 +151,8 @@ func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(Strea
 	var thinking strings.Builder
 	calls := map[int]*ToolCall{}
 	committed := false
+	// 现场统计：空流时把它们带进错误里，否则只能看到一句"没有任何内容"。
+	dataLines, bodyBytes, sawOnlyDone := 0, 0, false
 
 	emit := func(kind, s string) error {
 		if s == "" {
@@ -164,8 +178,14 @@ func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(Strea
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			if dataLines == 0 {
+				sawOnlyDone = true
+			}
+			dataLines++
 			break
 		}
+		dataLines++
+		bodyBytes += len(data)
 		var chunk oaStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			// 单行坏 JSON 不该打断整个流（网关偶尔会插一行脏数据）。
@@ -180,6 +200,7 @@ func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(Strea
 				Input:     chunk.Usage.PromptTokens,
 				Output:    chunk.Usage.CompletionTokens,
 				CacheRead: chunk.Usage.PromptTokensDetails.CachedTokens,
+				Reasoning: chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 			}
 		}
 		for _, ch := range chunk.Choices {
@@ -234,8 +255,27 @@ func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(Strea
 
 	result := partial(out, &text, &thinking, calls)
 	if result.Text == "" && len(result.ToolCalls) == 0 {
-		// 一个事件都没有：这是"空响应"，可以重试（L2）。
-		return nil, false, fmt.Errorf("%w: 流里没有任何内容", ErrTransient)
+		// 两种"什么都没给"，处理方式相反：
+		//   1) 有推理、没正文 —— 推理把输出预算吃光了，重试只会再撞一次；
+		//   2) 连推理都没有 —— 网关/网络抖动，可以重试（L2）。
+		if thinking.Len() > 0 || out.Usage.Reasoning > 0 {
+			if result.StopReason == "" {
+				result.StopReason = "stop"
+			}
+			return result, false, &ReasoningOnlyError{
+				Finish:          result.StopReason,
+				ReasoningTokens: out.Usage.Reasoning,
+				ReasoningChars:  thinking.Len(),
+				MaxTokens:       o.cfg.MaxTokens,
+			}
+		}
+		return nil, false, &EmptyStreamError{
+			Status:    resp.StatusCode,
+			Elapsed:   time.Since(start),
+			DataLines: dataLines,
+			Bytes:     bodyBytes,
+			OnlyDone:  sawOnlyDone,
+		}
 	}
 	if result.StopReason == "" {
 		result.StopReason = "stop"

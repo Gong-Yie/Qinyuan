@@ -301,6 +301,36 @@ func TestSettleMapping(t *testing.T) {
 	}
 }
 
+// 偶发模型/网络失败：第一次放回队列，第二次才 blocked。
+// 否则网关抖一下就把整条方向永久封死 —— run #41 的 5 条白盒意图就是这样死的。
+func TestSettleRequeuesTransientOnce(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	run, _ := newLoopbackRun(t, st, "http://127.0.0.1:1")
+	intentID, err := st.AddIntent(ctx, store.AddIntentInput{RunID: run.ID, Summary: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := newEngineFor(t, st, llm.NewFakeFactory())
+	transient := &llm.EmptyStreamError{Status: 200, Elapsed: time.Second, DataLines: 1, OnlyDone: true}
+
+	for i, want := range []string{model.StateOpen, model.StateBlocked} {
+		if ok, err := st.ClaimIntent(ctx, run.ID, intentID, "w1"); err != nil || !ok {
+			t.Fatalf("第 %d 次 claim 失败：ok=%v err=%v", i+1, ok, err)
+		}
+		// worker 收尾前会写一条 llm_error 的系统行；止损计数读的就是它。
+		eng.emit(ctx, &model.Activity{
+			RunID: run.ID, NodeID: &intentID, Worker: "w1", Kind: model.ActSystem,
+			Summary: "模型调用失败（第 3 回合）", Detail: transient.Error(),
+			Metadata: map[string]any{"llm_error": true},
+		})
+		got := eng.settle(ctx, run.ID, intentID, &agent.Outcome{Reason: agent.ReasonError, Err: transient}, nil)
+		if got != want {
+			t.Fatalf("第 %d 次收尾 = %s，期望 %s", i+1, got, want)
+		}
+	}
+}
+
 // 暂停后不得领新活（暂停必须真的拦住执行，而不只是改个标记）。
 func TestPausedDoesNotClaim(t *testing.T) {
 	st := newTestStore(t)

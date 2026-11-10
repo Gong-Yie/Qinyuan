@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -203,6 +205,82 @@ func (s *Store) LastIntentOutput(ctx context.Context, runID, intentID int64) (st
 		return "", nil
 	}
 	return out, err
+}
+
+// IntentVerdict 是一条意图"最后怎么结束、卡在哪"的结构化摘要。
+//
+// 为什么需要它：worker 因为模型/网络失败而中断时 assistant 正文是空的，
+// planner 只拿到 {"output":""} —— 它分不清"没探成""跑偏了""这件事工具面根本做不到"，
+// 于是按 prompt 的"纯外部故障 → 重派同方向"反复重启同一个死方向
+// （run #41 的白盒意图被连派 5 次，见 docs/19）。
+type IntentVerdict struct {
+	State     string
+	Reason    string
+	Turns     int
+	Facts     int
+	Findings  int
+	LastError string
+}
+
+// IntentVerdict 读一条意图的终态、结束原因、产出计数与最后一条错误。
+func (s *Store) IntentVerdict(ctx context.Context, runID, intentID int64) (*IntentVerdict, error) {
+	v := &IntentVerdict{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT state FROM nodes WHERE run_id=$1 AND id=$2 AND kind='intent'`,
+		runID, intentID).Scan(&v.State)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("意图 #%d 不存在于本任务", intentID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var meta []byte
+	err = s.pool.QueryRow(ctx, `
+		SELECT COALESCE(metadata, '{}'::jsonb) FROM activity
+		 WHERE run_id=$1 AND node_id=$2 AND kind='result'
+		 ORDER BY id DESC LIMIT 1`, runID, intentID).Scan(&meta)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if len(meta) > 0 {
+		var m struct {
+			Reason   string `json:"reason"`
+			Turns    int    `json:"turns"`
+			Facts    int    `json:"facts"`
+			Findings int    `json:"findings"`
+		}
+		if json.Unmarshal(meta, &m) == nil {
+			v.Reason, v.Turns, v.Facts, v.Findings = m.Reason, m.Turns, m.Facts, m.Findings
+		}
+	}
+
+	// 最后一条"真的出了错"的行：span 的 metadata.error、worker 写的 llm_error、
+	// 或工具错误。注意 tool.call 的 span 里有 "error": false，必须排除掉。
+	err = s.pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(metadata->>'error',''), NULLIF(detail,''), summary, '')
+		  FROM activity
+		 WHERE run_id=$1 AND node_id=$2
+		   AND ((metadata->>'error' IS NOT NULL AND metadata->>'error' NOT IN ('','false'))
+		        OR metadata->>'llm_error' = 'true' OR is_error)
+		 ORDER BY id DESC LIMIT 1`, runID, intentID).Scan(&v.LastError)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return v, nil
+}
+
+// CountIntentTransientFailures 数一条意图历史上"模型/网络偶发失败"的次数。
+//
+// 收尾用它止损：第一次偶发失败把意图放回队列重试，第二次就落 blocked，
+// 否则网关一直抖的时候会无限重跑同一个意图。
+func (s *Store) CountIntentTransientFailures(ctx context.Context, runID, intentID int64) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM activity
+		 WHERE run_id=$1 AND node_id=$2 AND kind='system' AND metadata->>'llm_error' = 'true'`,
+		runID, intentID).Scan(&n)
+	return n, err
 }
 
 func scanActivities(rows pgx.Rows) ([]*model.Activity, error) {

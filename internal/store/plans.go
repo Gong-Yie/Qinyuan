@@ -292,9 +292,23 @@ func (s *Store) SatisfyStepsByFact(ctx context.Context, runID, factID int64, tex
 	if err != nil {
 		return nil, err
 	}
+	realizedBy, producedBy, err := s.stepIntentLinks(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
 	var satisfied []int64
 	for _, st := range pg.Steps {
 		if st.State == model.StateDone || st.State == "skipped" || st.Expected == "" {
+			continue
+		}
+		// 这一步已经派给某条意图时，只认**那条意图**产出的事实。
+		//
+		// 为什么：expected_evidence 常常就是"要拿到的那个文件/路由名"，
+		// 而另一条意图做黑盒探测时，evidence 里会原样写下"GET /WEB-INF/web.xml → 404"。
+		// 纯片段匹配会让这个 404 把"展开 ROOT.war 并清点 WEB-INF"判成 done
+		// （run #41 的 step#276←fact#283 就是这样，见 docs/19）。
+		// 计划外的旁证仍然可用：planner 显式 mark_step_done 即可。
+		if ris := realizedBy[st.ID]; len(ris) > 0 && !sharesIntent(ris, producedBy[factID]) {
 			continue
 		}
 		if !expectedMatches(text, st.Expected) {
@@ -311,6 +325,49 @@ func (s *Store) SatisfyStepsByFact(ctx context.Context, runID, factID int64, tex
 		}
 	}
 	return satisfied, nil
+}
+
+// stepIntentLinks 读出计划图的两条关系：
+//
+//	realizedBy[stepID] = 派给它的意图（step --realized_by--> intent）
+//	producedBy[factID] = 产出它的事实来源意图（intent --yields--> fact）
+func (s *Store) stepIntentLinks(ctx context.Context, runID int64) (map[int64][]int64, map[int64][]int64, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT rel, src_id, dst_id FROM edges
+		 WHERE run_id=$1 AND rel IN ('realized_by','yields')`, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	realizedBy := map[int64][]int64{}
+	producedBy := map[int64][]int64{}
+	for rows.Next() {
+		var rel string
+		var src, dst int64
+		if err := rows.Scan(&rel, &src, &dst); err != nil {
+			return nil, nil, err
+		}
+		switch rel {
+		case model.RelRealizedBy:
+			realizedBy[src] = append(realizedBy[src], dst)
+		case model.RelYields:
+			producedBy[dst] = append(producedBy[dst], src)
+		}
+	}
+	return realizedBy, producedBy, rows.Err()
+}
+
+// sharesIntent 判断两个意图集合有没有交集。
+func sharesIntent(a, b []int64) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MarkStepDone 由 planner 显式判定某步达成（规则匹配不上时用）。

@@ -178,7 +178,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 15-M7-平台化七件套.md    trace / outbox / GraphStore / 战役 / 审批SLA / 报告 / 连接器
 │   ├── 16-M8-控制台与DTO迁移.md  战役页 / 运维页 / 时间线 Tab / 批量审批 / DTO 迁 model
 │   ├── 17-M9-鉴权.md           令牌/角色 / Cookie 会话 / CSRF / 登录限速 / 启动自检
-│   └── 18-M12-附件.md          上传 / 内容寻址 / 清单注入 / 只读工具 / 不可信输入
+│   ├── 18-M12-附件.md          上传 / 内容寻址 / 清单注入 / 只读工具 / 不可信输入
+│   └── 19-CTF1-复盘.md         真实 CTF 暴露的五个缺陷（空流 / 计划图假完成 / 能力面）
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
@@ -655,6 +656,10 @@ T4 删除屏障、T5 完整重启恢复（只有部分）、T6 准入队列、T1
 | 13 | 任务 `done` 后计划步骤永远停在 `running` | `LinkStepIntent` 只有 `ready/todo→running`，出口只有"规则命中"和"显式 mark"，意图结束没人回收 | `CASIntent` 落终态时同事务回收（`store/step_reconcile.go`）；`paused` 不回收 |
 | 14 | 10 个真实步骤、0 次规则自动完成 | `expected_evidence` 是任务口吻整句，2-gram 覆盖率被动词稀释到 20~40%，且 2-gram 跨词边界 | `expectedMatches` 改成"子句 + 3/4 字片段"（4 字 1 个 或 3 字 2 个），prompt 要求写判据词条；详见 `docs/08` |
 | 15 | `/login` 缺 `X-Powered-By` 被断言成"nginx 静态文件"，却仍标 `observed` | 两档语义没定义边界，模型把"由缺失推出的结论"当成直接观察 | prompt + `record_fact` 描述钉死：缺失/差异/时序/排除法推出的一律 `inferred` 并写推理链；详见 `docs/08` |
+| 16 | 计划图把"探测 404"当证据：step#276 被"GET /WEB-INF/web.xml → 404"判成 done | 规则在 fact 的 **evidence 全文**里做片段匹配，而 evidence 恰好列出探测过的路径 | 步骤已派工（`realized_by`）时**只认那条意图产出的事实**；旁证仍可 `mark_step_done`（`plans.go`、`TestStepSatisfiedOnlyByItsOwnIntent`，详见 `docs/19`） |
+| 17 | 5 条白盒意图全挂在"流里没有任何内容"，意图永久 blocked；planner 只看到空 output | 空流 / 只有推理 / 网关抖动混成一个 `ErrTransient`，且失败只留一句"执行结束：error" | 拆成 `EmptyStreamError`（带 200/字节/`[DONE]`/耗时）与 `ReasoningOnlyError`（**不重试**）；偶发失败且未写回任何事实时意图放回队列重试一次；`get_worker_output` 带 `last_error`（`docs/19`） |
+| 18 | planner 连派 5 次"解包 + 反编译"，执行者根本做不到 | prompt 承诺"脚本/中间产物写到工作目录"，但 worker 没有 shell、没有写文件工具 | 三处 prompt 改成能力矩阵：没有 shell、不能解包/反编译/写文件，附件只能按字节读（`docs/19`） |
+| 19 | 0 意图停摆后空转 10 分钟（第 9 → 10 轮） | 心跳 600s 兜底；prompt 的"停摆时不得 0 意图"没有强制 | **未修**，见 `docs/19 §7.4` |
 
 > 共性：**上下文生命周期**（1/3/6）与**状态机竞态**（2/7/8/9）。只看代码看不出来，必须让测试真的跑起来。
 
