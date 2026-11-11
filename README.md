@@ -1,5 +1,8 @@
 # 钦原（Qinyuan）
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
+
 授权 Web 安全测试 Agent —— Go 后端 + PostgreSQL，把探索过程外化成一张**可查询、可审计、可重启**的图，让 LLM 在图上反复"规划 → 执行 → 写回"。
 
 > **当前进度：M0 + M1 + M2 + M3a + M3.5 + M4a + M4b + M4c + M5 已跑通。** 库与迁移、CAS 队列、实体去重、工具层、worker 执行循环、九分支收尾、planner（事件唤醒 / 心跳 / add_intent / prove_goal）、OpenAI 兼容 provider、超时收尾、启动恢复、**计划图（step 依赖 + 规则化 done）**、**覆盖度**、**第 0 轮目标拆解（set_goals / set_constraints / add_scope）**、**差分态势（rev 版本戳 + 增量输入 + refresh_overview）**、**收尾轮（撞预算不白跑）**、**上下文压缩**、**`steer_work` 实时纠偏**、最小 REST、CLI、端到端 demo、自动化验收都在。
@@ -224,4 +227,5 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 
 ## 许可
 
-MIT。本项目为 clean-room 实现，不含 AGPL 的 ARTEX / norma 源代码。
+[Apache License 2.0](LICENSE)（含专利授权与商标条款；分发时保留 [`NOTICE`](NOTICE)）。
+本项目为 clean-room 实现，不含 AGPL 的 ARTEX / norma 源代码。

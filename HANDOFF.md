@@ -26,7 +26,7 @@
 **一句话**：钦原是一个**授权 Web 安全测试 Agent**：把探索"思考"外化成一张可查询、可审计、可重启的图（`nodes/edges/anchors`），再用事件驱动的调度器让 LLM 在图上反复"规划 → 执行 → 写回"。
 
 - 语言：Go（后端全部）+ PostgreSQL（唯一存储）
-- 定位：clean-room 实现，**不包含** AGPL 的 ARTEX / norma 源码；许可证 MIT
+- 定位：clean-room 实现，**不包含** AGPL 的 ARTEX / norma 源码；许可证 Apache-2.0
 - 参考文档：`E:\项目\项目学习\{学习.md, ARTEX-架构笔记.md, 升级计划.md, 实现规格\}`（**只读参考，不要拷贝 ARTEX 代码**）
 
 ### 进度矩阵
@@ -916,6 +916,6 @@ pwsh -File scripts/demo/demo-m4.ps1               # M4 现场演示（收尾轮/
 2. **真实模型 live 冒烟**：需要 `base_url + model`（key 走环境变量）；这一步能暴露 prompt 质量与工具调用质量，是 fake provider 测不出来的。
 3. **`expectedMatches` 的匹配规则**（中文 2-gram + 60% 覆盖）是否够准；太松会假完成，太紧会一直等人。
 4. **`add_intent` 强制 `step_id`** 是否会让 planner 为了过校验硬凑步骤。
-5. **许可证**：当前 MIT；如果将来要复用 ARTEX/norma 的任何代码，必须先停下来讨论 AGPL 传染问题。
+5. **许可证**：当前 Apache-2.0；如果将来要复用 ARTEX/norma 的任何代码，必须先停下来讨论 AGPL 传染问题。
 6. **生产形态**：PG 是继续便携实例还是独立实例；是否需要**多用户/SSO**（鉴权已有，见 `docs/17`）；
    部署目标（单二进制 + 反代）。
