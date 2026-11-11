@@ -75,6 +75,22 @@ type Config struct {
 	Auth AuthConfig
 
 	LLM LLMConfig
+
+	// M17：执行沙箱（默认关闭）。开启后 worker 多一个 exec 工具，
+	// 出网只按 run_scope + 回连白名单放行（docs/24）。
+	Sandbox SandboxConfig
+}
+
+// SandboxConfig 是执行沙箱的运行参数（形态见 docs/24）。
+type SandboxConfig struct {
+	Enabled   bool
+	Distro    string
+	Image     string
+	Network   string
+	Subnet    string
+	JobRoot   string
+	Timeout   time.Duration
+	MaxOutput int
 }
 
 // AuthConfig 是鉴权配置。
@@ -430,6 +446,27 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("解析数据目录失败：%w", err)
 	}
 	c.DataDir = abs
+
+	// M17：执行沙箱（默认关闭；WSL2 + Docker）。
+	if v, _ := pick("QINYUAN_SANDBOX", fileVals, "off"); v == "on" || v == "docker" || v == "1" || strings.EqualFold(v, "true") {
+		c.Sandbox.Enabled = true
+	}
+	c.Sandbox.Distro, _ = pick("QINYUAN_SANDBOX_DISTRO", fileVals, "Ubuntu-24.04")
+	c.Sandbox.Image, _ = pick("QINYUAN_SANDBOX_IMAGE", fileVals, "qinyuan/sandbox:latest")
+	c.Sandbox.Network, _ = pick("QINYUAN_SANDBOX_NETWORK", fileVals, "qy-sandbox")
+	c.Sandbox.Subnet, _ = pick("QINYUAN_SANDBOX_SUBNET", fileVals, "10.201.0.0/24")
+	c.Sandbox.JobRoot, _ = pick("QINYUAN_SANDBOX_JOBROOT", fileVals, "/var/lib/qinyuan/jobs")
+	if v, _ := pick("QINYUAN_SANDBOX_TIMEOUT_SECONDS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 5 || n > 900 {
+			return nil, fmt.Errorf("QINYUAN_SANDBOX_TIMEOUT_SECONDS 非法：%q（5..900）", v)
+		}
+		c.Sandbox.Timeout = time.Duration(n) * time.Second
+	}
+	if c.Sandbox.Timeout <= 0 {
+		c.Sandbox.Timeout = 120 * time.Second
+	}
+	c.Sandbox.MaxOutput = c.MaxToolOutput
 	return c, nil
 }
 

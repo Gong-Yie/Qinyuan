@@ -56,6 +56,7 @@
 | M14 | 附件归档与 strings：`archive_list`（可穿透嵌套）/ `archive_read`（text/strings/hex）/ `read_attachment mode=strings`（`docs/20`） | ✅ |
 | M15 | 停摆重规划：目标未达成且无 open/running 意图时，2×800ms 立即重规划 → 2 分钟巡检 ×3 → 心跳（`docs/21`） | ✅ |
 | M16 | 推理预算自动升级：`finish=length` 且只有推理时把 `max_tokens` 翻倍重试一次（上限 16384），不再直接打死意图（`docs/22`） | ✅ |
+| M17 | 执行沙箱：WSL2+Docker，命令在非 root 容器里跑；出网默认全拒，只放行 `run_scope` + 显式回连白名单（`docs/24`） | ✅（单槽串行；见 §12） |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -163,6 +164,17 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_COOKIE_SECURE` | `0` | 反代 + HTTPS 时设 1（会话 cookie 只走 TLS） |
 | `QINYUAN_MAX_UPLOAD_MB` | `32` | 单个附件上限（1..512）；超限直接 400 |
 
+**M17 执行沙箱**（默认关闭；开启需要 WSL2 + Docker）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `QINYUAN_SANDBOX` | `off` | `off` / `on`（=docker）。`on` 时启动会自检 WSL+Docker，不可用直接拒绝启动 |
+| `QINYUAN_SANDBOX_DISTRO` | `Ubuntu-24.04` | WSL 发行版名 |
+| `QINYUAN_SANDBOX_IMAGE` | `qinyuan/sandbox:latest` | 沙箱镜像（`scripts/sandbox/Dockerfile`） |
+| `QINYUAN_SANDBOX_NETWORK` / `_SUBNET` | `qy-sandbox` / `10.201.0.0/24` | 沙箱专用 docker 网络 |
+| `QINYUAN_SANDBOX_JOBROOT` | `/var/lib/qinyuan/jobs` | 每次执行的 /job 目录根（WSL 内路径） |
+| `QINYUAN_SANDBOX_TIMEOUT_SECONDS` | `120` | 单次执行上限（5..900） |
+
 ---
 
 ## 3. 仓库结构
@@ -187,7 +199,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 20-M14-归档与字符串工具.md  受控 zip 清单 / 嵌套下钻 / strings（不落盘）
 │   ├── 21-M15-停摆重规划.md    0 意图不再干等 600s 心跳（有界重规划）
 │   ├── 22-M16-推理预算升级.md  推理吃光 max_tokens 时翻倍重试一次
-│   └── 23-CTF1-retest-实跑.md  run #42 实跑报告（2 分钟定位 /api/test，flag 未取到）
+│   ├── 23-CTF1-retest-实跑.md  run #42 实跑报告（2 分钟定位 /api/test，flag 未取到）
+│   └── 24-执行沙箱设计.md      WSL2+Docker / 出网显式回连白名单（M17）
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）

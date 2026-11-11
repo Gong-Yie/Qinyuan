@@ -19,6 +19,7 @@ import (
 	"qinyuan/internal/domain"
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
+	"qinyuan/internal/sandbox"
 	"qinyuan/internal/store"
 )
 
@@ -48,6 +49,10 @@ type Context struct {
 	// RefreshRequested 由 refresh_overview 置位：下一轮 planner 重新给全量态势。
 	// planner 为 nil（worker 没有这个工具）。
 	RefreshRequested *bool
+	// Sandbox 是执行沙箱（nil = 未启用）。启用时 worker 才有 exec 工具。
+	Sandbox sandbox.Runner
+	// Egress 由编排层注入：按 network 级别返回放行项（target / callback）。
+	Egress func(network string) []sandbox.Allow
 }
 
 // Result 工具返回给模型的文本。

@@ -12,6 +12,7 @@ import (
 	"qinyuan/internal/domain"
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
+	"qinyuan/internal/sandbox"
 	"qinyuan/internal/store"
 	"qinyuan/internal/trace"
 )
@@ -64,6 +65,10 @@ type Worker struct {
 	Steer func() (string, bool)
 	// Gate 是审批门（规则 → 人工）；nil = 不启用。
 	Gate *Gate
+	// Sandbox 是执行沙箱（nil = 未启用；此时 exec 工具会明确报错）。
+	Sandbox sandbox.Runner
+	// Egress 由编排层注入：按 network 级别返回放行项（target / callback）。
+	Egress func(ctx context.Context, runID, intentID int64, network string) []sandbox.Allow
 }
 
 // Execute 跑一条已领取（state=running）的意图。
@@ -122,6 +127,10 @@ func (w *Worker) Execute(ctx context.Context, runID, intentID int64, owner strin
 		DataDir:       w.DataDir,
 		AllowLoopback: w.AllowLoopback,
 		MaxOutput:     w.MaxOutput,
+		Sandbox:       w.Sandbox,
+	}
+	if w.Egress != nil {
+		rc.Egress = func(network string) []sandbox.Allow { return w.Egress(ctx, runID, intentID, network) }
 	}
 
 	maxTurns, maxDuration, budgetApplied := resolveBudget(w.MaxTurns, w.MaxDuration, intent.Payload)

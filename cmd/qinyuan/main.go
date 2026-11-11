@@ -28,6 +28,7 @@ import (
 	"qinyuan/internal/model"
 	"qinyuan/internal/outbox"
 	"qinyuan/internal/runplan"
+	"qinyuan/internal/sandbox"
 	"qinyuan/internal/server"
 	"qinyuan/internal/store"
 )
@@ -171,9 +172,27 @@ func buildProviders(cfg *config.Config, log *slog.Logger) (llm.Factory, error) {
 	}
 }
 
-func newEngine(cfg *config.Config, st *store.Store, providers llm.Factory, log *slog.Logger) *engine.Engine {
+func newEngine(cfg *config.Config, st *store.Store, providers llm.Factory, log *slog.Logger) (*engine.Engine, error) {
 	// 复测要能读到落盘的原始请求体（DB 里只有 8KB 预览）。
 	agent.SetTrafficDataDir(cfg.DataDir)
+	var box sandbox.Runner
+	if cfg.Sandbox.Enabled {
+		w := sandbox.NewWSLDocker(sandbox.Config{
+			Distro: cfg.Sandbox.Distro, Image: cfg.Sandbox.Image,
+			Network: cfg.Sandbox.Network, Subnet: cfg.Sandbox.Subnet,
+			JobRoot: cfg.Sandbox.JobRoot, Timeout: cfg.Sandbox.Timeout,
+			MaxOutput: cfg.Sandbox.MaxOutput,
+		})
+		checkCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err := w.Check(checkCtx)
+		cancel()
+		if err != nil {
+			// 显式开启却不可用：启动就失败，别让 exec 在运行期悄悄变成"没启用"。
+			return nil, fmt.Errorf("QINYUAN_SANDBOX=on 但沙箱不可用：%w", err)
+		}
+		box = w
+		log.Info("[sandbox] 执行沙箱已启用", "distro", cfg.Sandbox.Distro, "image", cfg.Sandbox.Image, "network", cfg.Sandbox.Network)
+	}
 	return engine.New(st, providers, agent.NewWorkerRegistry(), agent.NewPlannerRegistry(), engine.Config{
 		DataDir:             cfg.DataDir,
 		AllowLoopback:       cfg.AllowLoopback,
@@ -198,7 +217,8 @@ func newEngine(cfg *config.Config, st *store.Store, providers llm.Factory, log *
 		ApprovalLowAction:   cfg.ApprovalLowAction,
 		ApprovalMidAction:   cfg.ApprovalMidAction,
 		ApprovalHighAction:  cfg.ApprovalHighAction,
-	}, log)
+		Sandbox:             box,
+	}, log), nil
 }
 
 // buildConnectors 按配置装配外部连接器（P3-3）。
@@ -295,7 +315,11 @@ func cmdServe(args []string, log *slog.Logger) int {
 		fmt.Fprintln(os.Stderr, "模型配置错误：", err)
 		return 1
 	}
-	eng := newEngine(cfg, st, providers, log)
+	eng, err := newEngine(cfg, st, providers, log)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "启动失败：", err)
+		return 1
+	}
 	// 引擎循环自己持生命周期（不挂请求 ctx）；退出时显式停。
 	defer eng.StopAll(engine.ErrShutdown)
 	// 并发准入的兜底补位：队列里的任务不会自己启动，靠 ticker + 事件两个入口。
@@ -545,7 +569,11 @@ func cmdWork(args []string, log *slog.Logger) int {
 		fmt.Fprintln(os.Stderr, "模型配置错误：", err)
 		return 1
 	}
-	eng := newEngine(cfg, st, providers, log)
+	eng, err := newEngine(cfg, st, providers, log)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "启动失败：", err)
+		return 1
+	}
 	if *turns > 0 {
 		eng.Cfg.MaxTurns = *turns
 	}
@@ -874,7 +902,11 @@ func cmdDemo(args []string, log *slog.Logger) int {
 			Usage: llm.Usage{Input: 80, Output: 40}},
 	)
 
-	eng := newEngine(cfg, st, fake, log)
+	eng, err := newEngine(cfg, st, fake, log)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "启动失败：", err)
+		return 1
+	}
 	claimed, err := eng.Work(ctx, run.ID, "demo-worker")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "执行失败：", err)

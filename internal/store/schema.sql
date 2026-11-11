@@ -682,3 +682,24 @@ CREATE TABLE IF NOT EXISTS attachments (
     UNIQUE (run_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_run ON attachments(run_id, id);
+-- ---------------------------------------------------------------------------
+-- M17：执行沙箱的回连白名单（operator 显式登记，模型不可写）
+--
+-- run_scope 回答"允许打谁"（出站、目标侧、固定端口）；
+-- 这张表回答"谁允许连回沙箱"（反连、操作者侧、动态端口）。两者不能混用。
+-- 规则在每次 exec 时渲染进 iptables（docs/24），过期/吊销后自动不再放行。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS run_callbacks (
+    id         BIGSERIAL PRIMARY KEY,
+    run_id     BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    host       TEXT NOT NULL,
+    proto      TEXT NOT NULL DEFAULT 'tcp' CHECK (proto IN ('tcp','udp')),
+    ports      TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT 'operator',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_run_callbacks_active
+    ON run_callbacks(run_id, expires_at) WHERE revoked_at IS NULL;

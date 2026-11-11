@@ -140,6 +140,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/attachments/{aid}", s.handleDownloadAttachment)
 	mux.HandleFunc("DELETE /api/runs/{id}/attachments/{aid}", s.handleDeleteAttachment)
 
+	// M17：回连白名单（operator 显式登记；模型没有工具，防提示注入）。
+	mux.HandleFunc("POST /api/runs/{id}/callbacks", s.handleCreateCallback)
+	mux.HandleFunc("GET /api/runs/{id}/callbacks", s.handleListCallbacks)
+	mux.HandleFunc("DELETE /api/runs/{id}/callbacks/{cid}", s.handleRevokeCallback)
+
 	// 控制台静态资源（go:embed）。必须放在最后：`GET /` 会兜住所有非 API 路径。
 	mux.Handle("GET /", s.staticHandler())
 

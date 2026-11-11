@@ -16,6 +16,7 @@ import (
 	"qinyuan/internal/agent"
 	"qinyuan/internal/llm"
 	"qinyuan/internal/model"
+	"qinyuan/internal/sandbox"
 	"qinyuan/internal/store"
 	"qinyuan/internal/trace"
 )
@@ -70,6 +71,9 @@ type Config struct {
 	ApprovalLowAction   string
 	ApprovalMidAction   string
 	ApprovalHighAction  string
+
+	// M17：执行沙箱（nil = 未启用；exec 工具会明确报错）。
+	Sandbox sandbox.Runner
 }
 
 type runRuntime struct {
@@ -226,6 +230,10 @@ func (e *Engine) worker() *agent.Worker {
 		},
 		Compaction: agent.CompactionConfig{WindowTokens: e.Cfg.ContextWindowTokens},
 		Gate:       e.gate,
+	}
+	if e.Cfg.Sandbox != nil {
+		w.Sandbox = e.Cfg.Sandbox
+		w.Egress = e.egressFor
 	}
 	return w
 }

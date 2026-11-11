@@ -387,6 +387,7 @@ func NewWorkerRegistry() *Registry {
 		NewReadAttachmentTool(),
 		NewArchiveListTool(),
 		NewArchiveReadTool(),
+		NewExecTool(),
 	)
 }
 
