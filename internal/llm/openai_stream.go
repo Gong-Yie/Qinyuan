@@ -62,6 +62,8 @@ type oaStreamChunk struct {
 //   - 未 committed：可以重试（网络/5xx/429），最多 MaxRetries 次；
 //   - 已 committed：不再重试，返回**部分结果 + ErrStreamInterrupted**
 //     （上层据此把它当作"这次 run 的部分结果"，而不是重放整条意图）。
+//   - 推理吃光输出预算（finish=length 且只有推理）：**不计入**普通重试，
+//     而是把 max_tokens 翻倍后再试一次（上限 maxEscalatedTokens）。
 func (o *OpenAI) Stream(ctx context.Context, req *Request, onEvent func(StreamEvent) error) (*Response, error) {
 	body, err := o.buildBody(req)
 	if err != nil {
@@ -71,14 +73,32 @@ func (o *OpenAI) Stream(ctx context.Context, req *Request, onEvent func(StreamEv
 	body = injectStreamOptions(body)
 
 	var lastErr error
-	for attempt := 0; attempt <= o.cfg.MaxRetries; attempt++ {
+	attempts := 0
+	escalated := false
+	for {
 		resp, committed, err := o.streamOnce(ctx, body, onEvent)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
+
+		// 推理把输出预算吃光（run #42 实测：4096 token 全花在 thinking 上）：
+		// 同样的预算重放必然再撞，但把预算翻倍通常就能出正文。
+		// 只升级一次，且不计入普通重试次数。
+		var re *ReasoningOnlyError
+		if errors.As(err, &re) && re.Finish == "length" && !escalated &&
+			re.MaxTokens > 0 && re.MaxTokens < maxEscalatedTokens {
+			escalated = true
+			next := re.MaxTokens * 2
+			if next > maxEscalatedTokens {
+				next = maxEscalatedTokens
+			}
+			body = withMaxTokens(body, next)
+			continue
+		}
+
 		if errors.Is(err, ErrReasoningOnly) {
-			// 推理吃光预算：同样的请求重放只会再撞一次，直接把现场交回上层。
+			// 已经升级过预算仍然只有推理：把现场交回上层，别再空转。
 			if resp == nil {
 				resp = &Response{Provider: "openai", Model: o.cfg.Model}
 			}
@@ -95,13 +115,16 @@ func (o *OpenAI) Stream(ctx context.Context, req *Request, onEvent func(StreamEv
 		if !retryable(err) || ctx.Err() != nil {
 			return nil, err
 		}
+		if attempts >= o.cfg.MaxRetries {
+			return nil, lastErr
+		}
+		attempts++
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(backoff(attempt)):
+		case <-time.After(backoff(attempts - 1)):
 		}
 	}
-	return nil, lastErr
 }
 
 func injectStreamOptions(body []byte) []byte {
@@ -111,6 +134,24 @@ func injectStreamOptions(body []byte) []byte {
 	}
 	m["stream"] = true
 	m["stream_options"] = map[string]any{"include_usage": true}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// maxEscalatedTokens 是"推理吃光预算"时允许自动升到的上限。
+// 再往上只是在喂胖思考；正确做法是换输入（别喂大段 hexdump）。
+const maxEscalatedTokens = 16384
+
+// withMaxTokens 改请求体里的 max_tokens（升级推理预算用）。
+func withMaxTokens(body []byte, n int) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	m["max_tokens"] = n
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body

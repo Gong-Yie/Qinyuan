@@ -167,11 +167,11 @@ func TestOpenAIStreamRetriesBeforeCommit(t *testing.T) {
 	}
 }
 
-// 只有推理、没有正文（推理把 max_tokens 吃光）：不可重试，错误里要带现场。
+// 只有推理、没有正文（推理把 max_tokens 吃光）：先升一次预算，仍不行才报错。
 //
-// 实测见 docs/19：deepseek-flash 对 1KB hexdump 做结构分析时，
+// 实测见 docs/19 / docs/22：deepseek-flash 对 1KB hexdump 做结构分析时，
 // 4096 个输出 token 全部花在 reasoning 上，正文 0 字节、无工具调用。
-func TestOpenAIStreamReasoningOnlyIsNotRetried(t *testing.T) {
+func TestOpenAIStreamReasoningOnlyEscalatesThenStops(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
@@ -183,7 +183,7 @@ func TestOpenAIStreamReasoningOnlyIsNotRetried(t *testing.T) {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
-	p := newTestProvider(t, srv.URL, 2) // 即使允许重试，也不该重试
+	p := newTestProvider(t, srv.URL, 2) // 普通重试额度不该被用掉
 
 	resp, err := p.Stream(context.Background(), &Request{
 		Messages: []Message{{Role: RoleUser, Text: "分析这段 hex"}},
@@ -194,8 +194,9 @@ func TestOpenAIStreamReasoningOnlyIsNotRetried(t *testing.T) {
 	if errors.Is(err, ErrTransient) {
 		t.Fatalf("推理吃光预算不是抖动，不该被当成 ErrTransient：%v", err)
 	}
-	if n := atomic.LoadInt32(&hits); n != 1 {
-		t.Fatalf("不该重试（请求数 %d）", n)
+	// 第 1 次 4096 被推理吃光 → 升到 8192 再试一次；仍然只有推理 → 停（不再重试）。
+	if n := atomic.LoadInt32(&hits); n != 2 {
+		t.Fatalf("应当只升一次预算（请求数 %d，期望 2）", n)
 	}
 	if resp == nil || resp.Thinking == "" {
 		t.Fatalf("必须保留已收到的推理，实际 %+v", resp)
@@ -203,6 +204,51 @@ func TestOpenAIStreamReasoningOnlyIsNotRetried(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "max_tokens") || !strings.Contains(msg, "4096") {
 		t.Fatalf("错误里要带输出预算，实际 %q", msg)
+	}
+}
+
+// 推理吃光预算（finish=length）：把 max_tokens 翻倍再试一次，通常就能出正文。
+// run #42 实测：两个最值钱的意图（读 web.xml / 读 .class 常量池）都因此 blocked。
+func TestOpenAIStreamEscalatesReasoningBudget(t *testing.T) {
+	var hits int32
+	var secondMaxTokens int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		var req struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"reasoning_content":"想了很久"}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":4096,"completion_tokens_details":{"reasoning_tokens":4096}}}`)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		secondMaxTokens = req.MaxTokens
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"终于出正文了"}}]}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	// MaxRetries=0：升级不该占用普通重试额度。
+	p := newTestProvider(t, srv.URL, 0)
+
+	resp, err := p.Stream(context.Background(), &Request{
+		Messages: []Message{{Role: RoleUser, Text: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("升级后应当成功：%v", err)
+	}
+	if resp.Text != "终于出正文了" {
+		t.Fatalf("正文不对：%q", resp.Text)
+	}
+	if n := atomic.LoadInt32(&hits); n != 2 {
+		t.Fatalf("应当只多试一次（请求数 %d）", n)
+	}
+	if secondMaxTokens != 8192 {
+		t.Fatalf("升级后 max_tokens=%d，期望 8192", secondMaxTokens)
 	}
 }
 

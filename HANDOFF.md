@@ -55,6 +55,7 @@
 | M13 | CTF1 复盘的五处修复：空流分类 / 偶发失败重排队 / 失败可见 / 计划图判定收紧 / prompt 能力面（`docs/19`） | ✅ |
 | M14 | 附件归档与 strings：`archive_list`（可穿透嵌套）/ `archive_read`（text/strings/hex）/ `read_attachment mode=strings`（`docs/20`） | ✅ |
 | M15 | 停摆重规划：目标未达成且无 open/running 意图时，2×800ms 立即重规划 → 2 分钟巡检 ×3 → 心跳（`docs/21`） | ✅ |
+| M16 | 推理预算自动升级：`finish=length` 且只有推理时把 `max_tokens` 翻倍重试一次（上限 16384），不再直接打死意图（`docs/22`） | ✅ |
 
 > 控制台：`serve` 之后打开 `http://127.0.0.1:8787/` —— 侧边导航 + 卡片式仪表盘
 > （仪表盘 / 任务 / 发现 / 资产 / 设置；任务详情五 Tab：概览 / 会话 / 计划 / 成本 / 覆盖）。
@@ -184,7 +185,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 18-M12-附件.md          上传 / 内容寻址 / 清单注入 / 只读工具 / 不可信输入
 │   ├── 19-CTF1-复盘.md         真实 CTF 暴露的五个缺陷（空流 / 计划图假完成 / 能力面）
 │   ├── 20-M14-归档与字符串工具.md  受控 zip 清单 / 嵌套下钻 / strings（不落盘）
-│   └── 21-M15-停摆重规划.md    0 意图不再干等 600s 心跳（有界重规划）
+│   ├── 21-M15-停摆重规划.md    0 意图不再干等 600s 心跳（有界重规划）
+│   └── 22-M16-推理预算升级.md  推理吃光 max_tokens 时翻倍重试一次
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
