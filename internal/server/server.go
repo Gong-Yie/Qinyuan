@@ -43,6 +43,8 @@ type Server struct {
 	Auth *auth.Authenticator
 	// MaxUploadMB 是单个附件的大小上限（0 = 默认 32MB）。
 	MaxUploadMB int
+	// DefaultTaskTimeout 是"建任务时没给 timeout"的默认墙钟（秒；0 = 保持"不限"）。
+	DefaultTaskTimeout int
 }
 
 // New 构造。
@@ -229,6 +231,9 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
 		return
+	}
+	if req.TimeoutSeconds <= 0 && s.DefaultTaskTimeout > 0 {
+		req.TimeoutSeconds = s.DefaultTaskTimeout
 	}
 	in, err := runplan.Build(runplan.Request{
 		Goal: req.Goal, Description: req.Description, Name: req.Name,

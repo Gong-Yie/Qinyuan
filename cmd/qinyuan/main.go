@@ -363,6 +363,7 @@ func cmdServe(args []string, log *slog.Logger) int {
 	srv := server.New(st, eng, log)
 	srv.Connectors = fanout
 	srv.MaxUploadMB = cfg.MaxUploadMB
+	srv.DefaultTaskTimeout = cfg.DefaultTaskTimeout
 	authn, err := buildAuth(cfg, log)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "鉴权配置错误：", err)
@@ -410,13 +411,16 @@ func cmdRun(args []string, log *slog.Logger) int {
 		desc := fs.String("description", "", "背景/范围说明")
 		name := fs.String("name", "", "任务名")
 		target := fs.String("target", "", "目标 URL / IP / 域名 / 网段")
-		timeout := fs.Int("timeout", 0, "任务级超时秒数（0=不限）")
+		timeout := fs.Int("timeout", 0, "任务级超时秒数（0=用默认；默认见 QINYUAN_DEFAULT_TASK_TIMEOUT_SECONDS）")
 		workers := fs.Int("workers", 2, "worker 数")
 		_ = fs.Parse(rest)
 		cfg := mustConfig()
 		st := mustStore(ctx, cfg)
 		defer st.Close()
 
+		if *timeout <= 0 {
+			*timeout = cfg.DefaultTaskTimeout
+		}
 		in, err := runplan.Build(runplan.Request{
 			Goal: *goal, Description: *desc, Name: *name, Target: *target,
 			TimeoutSeconds: *timeout, WorkerCount: *workers,

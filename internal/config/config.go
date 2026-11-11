@@ -42,6 +42,8 @@ type Config struct {
 	DefaultTimeout  time.Duration // worker 每次执行的时长上限
 	// MaxUploadMB 是单个附件上限（M12）。
 	MaxUploadMB int
+	// DefaultTaskTimeout 是建任务时没给 timeout 的默认墙钟（秒；0 = 不限）。
+	DefaultTaskTimeout int
 
 	// M3.5：调度与上下文成本的可调项（都有安全默认值，不改也能跑）。
 	GoalsMaxTurns    int // 第 0 轮目标拆解的回合上限
@@ -206,21 +208,21 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		DataDir:           "data",
-		Addr:              "127.0.0.1:8787",
-		LogLevel:          "info",
-		MaxToolOutput:     30000,
-		DefaultMaxTurns:   12,
-		DefaultTimeout:    10 * time.Minute,
-		MaxUploadMB:       32,
-		GoalsMaxTurns:     8,
-		PlannerFullEvery:  20,
-		DeltaLimit:        200,
-		ContextWindowK:    200,
-		SettlementTurns:   3,
-		SettlementTimeout: 2 * time.Minute,
-		ApprovalTimeout:   5 * time.Minute,
-		ApprovalOnTimeout: "deny",
+		DataDir:             "data",
+		Addr:                "127.0.0.1:8787",
+		LogLevel:            "info",
+		MaxToolOutput:       30000,
+		DefaultMaxTurns:     12,
+		DefaultTimeout:      10 * time.Minute,
+		MaxUploadMB:         32,
+		GoalsMaxTurns:       8,
+		PlannerFullEvery:    20,
+		DeltaLimit:          200,
+		ContextWindowK:      200,
+		SettlementTurns:     3,
+		SettlementTimeout:   2 * time.Minute,
+		ApprovalTimeout:     5 * time.Minute,
+		ApprovalOnTimeout:   "deny",
 		ApprovalLowSeconds:  60,
 		ApprovalMidSeconds:  300,
 		ApprovalHighSeconds: 900,
@@ -278,6 +280,16 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_TIMEOUT_SECONDS 非法：%q", v)
 		}
 		c.DefaultTimeout = time.Duration(n) * time.Second
+	}
+	// 任务级默认墙钟（秒）：建任务时没给 timeout 就用它（0 = 保持"不限"）。
+	// CTF 类任务 20 分钟不够（run #43：前 12 分钟都在读源码），默认 45 分钟。
+	c.DefaultTaskTimeout = 2700
+	if v, _ := pick("QINYUAN_DEFAULT_TASK_TIMEOUT_SECONDS", fileVals, ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 14400 {
+			return nil, fmt.Errorf("QINYUAN_DEFAULT_TASK_TIMEOUT_SECONDS 非法：%q（0..14400）", v)
+		}
+		c.DefaultTaskTimeout = n
 	}
 	if v, _ := pick("QINYUAN_GOALS_MAX_TURNS", fileVals, ""); v != "" {
 		n, err := strconv.Atoi(v)
@@ -348,9 +360,9 @@ func Load() (*Config, error) {
 	}
 	// 分级审批（P3-4）：秒数只能在 [5, 3600] 内，动作只认 allow/deny。
 	for _, tier := range []struct {
-		key  string
-		dst  *int
-		def  int
+		key string
+		dst *int
+		def int
 	}{
 		{"QINYUAN_APPROVAL_LOW_SECONDS", &c.ApprovalLowSeconds, c.ApprovalLowSeconds},
 		{"QINYUAN_APPROVAL_MID_SECONDS", &c.ApprovalMidSeconds, c.ApprovalMidSeconds},

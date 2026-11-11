@@ -1,16 +1,18 @@
-# 钦原执行沙箱镜像（M17，docs/24）
+# 钦原执行沙箱镜像（M17/M18，docs/24）
 #
-# 只装"做实验要用"的工具：python3 / JDK / 网络工具 / 解包。
+# 关键点：**JDK 8**。目标题（jetty:9.4.49-jdk8）跑在 JDK8 上，
+# 用 JDK17 造序列化载荷会因为 svuid / 字段布局对不上而失败（run #43 实测）。
+# 这里用 Temurin 8 打底，保证 javac/java 与目标同代。
+#
 # 不装 docker、不装 sudo、不加 docker 组 —— 容器里跑的是不可信命令。
-FROM ubuntu:24.04
+FROM eclipse-temurin:8-jdk
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/sandbox \
     LANG=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv \
-        openjdk-17-jdk-headless \
+        python3 python3-pip \
         curl wget netcat-openbsd dnsutils \
         unzip zip jq file binutils \
         ca-certificates \

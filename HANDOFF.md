@@ -138,6 +138,7 @@ QINYUAN_LLM_MODEL=deepseek-chat
 | `QINYUAN_MAX_TOOL_OUTPUT` | `30000` | 单次工具输出上限（字符），超出落盘 |
 | `QINYUAN_MAX_TURNS` | `12` | worker 每次执行回合上限 |
 | `QINYUAN_TIMEOUT_SECONDS` | `600` | worker 每次执行时长上限 |
+| `QINYUAN_DEFAULT_TASK_TIMEOUT_SECONDS` | `2700` | 建任务时没给 `timeout_seconds` 的默认墙钟（秒；0 = 不限） |
 | `QINYUAN_LLM_PROVIDER` | `fake` | `fake` / `openai` |
 | `QINYUAN_LLM_BASE_URL` | `https://api.openai.com/v1` | |
 | `QINYUAN_LLM_API_KEY` | 空 | |
