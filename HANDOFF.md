@@ -186,7 +186,8 @@ QINYUAN_LLM_MODEL=deepseek-chat
 │   ├── 19-CTF1-复盘.md         真实 CTF 暴露的五个缺陷（空流 / 计划图假完成 / 能力面）
 │   ├── 20-M14-归档与字符串工具.md  受控 zip 清单 / 嵌套下钻 / strings（不落盘）
 │   ├── 21-M15-停摆重规划.md    0 意图不再干等 600s 心跳（有界重规划）
-│   └── 22-M16-推理预算升级.md  推理吃光 max_tokens 时翻倍重试一次
+│   ├── 22-M16-推理预算升级.md  推理吃光 max_tokens 时翻倍重试一次
+│   └── 23-CTF1-retest-实跑.md  run #42 实跑报告（2 分钟定位 /api/test，flag 未取到）
 ├── scripts/
 │   ├── devdb.ps1              便携 PG：init/start/stop/status/serve/psql/reset
 │   ├── go.ps1                 64 位 Go（系统优先，便携兜底）
