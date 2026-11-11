@@ -74,25 +74,24 @@ func (o *OpenAI) Stream(ctx context.Context, req *Request, onEvent func(StreamEv
 
 	var lastErr error
 	attempts := 0
-	escalated := false
+	curMax := o.cfg.MaxTokens
 	for {
-		resp, committed, err := o.streamOnce(ctx, body, onEvent)
+		resp, committed, err := o.streamOnce(ctx, body, curMax, onEvent)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
 
-		// 推理把输出预算吃光（run #42 实测：4096 token 全花在 thinking 上）：
+		// 推理把输出预算吃光（run #42/#44 实测：4096 与 8192 都被 thinking 吃满）：
 		// 同样的预算重放必然再撞，但把预算翻倍通常就能出正文。
-		// 只升级一次，且不计入普通重试次数。
+		// 允许一路升到 maxEscalatedTokens（4096 → 8192 → 16384），且不计入普通重试。
 		var re *ReasoningOnlyError
-		if errors.As(err, &re) && re.Finish == "length" && !escalated &&
-			re.MaxTokens > 0 && re.MaxTokens < maxEscalatedTokens {
-			escalated = true
-			next := re.MaxTokens * 2
+		if errors.As(err, &re) && re.Finish == "length" && curMax < maxEscalatedTokens {
+			next := curMax * 2
 			if next > maxEscalatedTokens {
 				next = maxEscalatedTokens
 			}
+			curMax = next
 			body = withMaxTokens(body, next)
 			continue
 		}
@@ -160,7 +159,7 @@ func withMaxTokens(body []byte, n int) []byte {
 }
 
 // streamOnce 跑一次流式请求。返回 (部分响应, 是否已 committed, error)。
-func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(StreamEvent) error) (*Response, bool, error) {
+func (o *OpenAI) streamOnce(ctx context.Context, body []byte, maxTokens int, onEvent func(StreamEvent) error) (*Response, bool, error) {
 	url := o.cfg.BaseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -307,7 +306,7 @@ func (o *OpenAI) streamOnce(ctx context.Context, body []byte, onEvent func(Strea
 				Finish:          result.StopReason,
 				ReasoningTokens: out.Usage.Reasoning,
 				ReasoningChars:  thinking.Len(),
-				MaxTokens:       o.cfg.MaxTokens,
+				MaxTokens:       maxTokens,
 			}
 		}
 		return nil, false, &EmptyStreamError{

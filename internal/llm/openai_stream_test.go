@@ -194,15 +194,15 @@ func TestOpenAIStreamReasoningOnlyEscalatesThenStops(t *testing.T) {
 	if errors.Is(err, ErrTransient) {
 		t.Fatalf("推理吃光预算不是抖动，不该被当成 ErrTransient：%v", err)
 	}
-	// 第 1 次 4096 被推理吃光 → 升到 8192 再试一次；仍然只有推理 → 停（不再重试）。
-	if n := atomic.LoadInt32(&hits); n != 2 {
-		t.Fatalf("应当只升一次预算（请求数 %d，期望 2）", n)
+	// 4096 → 8192 → 16384：升到上限仍然只有推理 → 停（不再重试）。
+	if n := atomic.LoadInt32(&hits); n != 3 {
+		t.Fatalf("应当升到上限（请求数 %d，期望 3）", n)
 	}
 	if resp == nil || resp.Thinking == "" {
 		t.Fatalf("必须保留已收到的推理，实际 %+v", resp)
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "max_tokens") || !strings.Contains(msg, "4096") {
+	if !strings.Contains(msg, "max_tokens") || !strings.Contains(msg, "16384") {
 		t.Fatalf("错误里要带输出预算，实际 %q", msg)
 	}
 }
