@@ -181,7 +181,7 @@ func newEngine(cfg *config.Config, st *store.Store, providers llm.Factory, log *
 			Distro: cfg.Sandbox.Distro, Image: cfg.Sandbox.Image,
 			Network: cfg.Sandbox.Network, Subnet: cfg.Sandbox.Subnet,
 			JobRoot: cfg.Sandbox.JobRoot, Timeout: cfg.Sandbox.Timeout,
-			MaxOutput: cfg.Sandbox.MaxOutput,
+			MaxOutput: cfg.Sandbox.MaxOutput, DataDir: cfg.DataDir,
 		})
 		checkCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		err := w.Check(checkCtx)
@@ -193,6 +193,7 @@ func newEngine(cfg *config.Config, st *store.Store, providers llm.Factory, log *
 		box = w
 		log.Info("[sandbox] 执行沙箱已启用", "distro", cfg.Sandbox.Distro, "image", cfg.Sandbox.Image, "network", cfg.Sandbox.Network)
 	}
+	log.Info("[approval] 审批模式", "mode", cfg.ApprovalMode, "disabled", cfg.ApprovalDisabled)
 	return engine.New(st, providers, agent.NewWorkerRegistry(), agent.NewPlannerRegistry(), engine.Config{
 		DataDir:             cfg.DataDir,
 		AllowLoopback:       cfg.AllowLoopback,
@@ -211,6 +212,7 @@ func newEngine(cfg *config.Config, st *store.Store, providers llm.Factory, log *
 		ApprovalTimeout:     cfg.ApprovalTimeout,
 		ApprovalOnTimeout:   cfg.ApprovalOnTimeout,
 		ApprovalDisabled:    cfg.ApprovalDisabled,
+		ApprovalMode:        cfg.ApprovalMode,
 		ApprovalLowSeconds:  cfg.ApprovalLowSeconds,
 		ApprovalMidSeconds:  cfg.ApprovalMidSeconds,
 		ApprovalHighSeconds: cfg.ApprovalHighSeconds,

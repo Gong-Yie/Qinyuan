@@ -90,3 +90,18 @@ func TestAddCallbackValidation(t *testing.T) {
 		}
 	}
 }
+
+// 端口校验必须整段是数字：旧实现 fmt.Sscanf("%d") 会接受 "4444abc"，
+// 创建成功但 sandbox.ParsePorts 拒绝，白名单静默不生效。
+func TestValidatePortsRejectsTrailingJunk(t *testing.T) {
+	for _, p := range []string{"4444abc", "40000-40100xyz", "4444-", "abc", "0", "70000", "500-400"} {
+		if err := validatePorts(p); err == nil {
+			t.Fatalf("%q 应被拒绝", p)
+		}
+	}
+	for _, p := range []string{"4444", "40000-40100", " 8080 "} {
+		if err := validatePorts(p); err != nil {
+			t.Fatalf("%q 应被接受：%v", p, err)
+		}
+	}
+}

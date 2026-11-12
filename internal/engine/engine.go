@@ -63,6 +63,8 @@ type Config struct {
 	ApprovalTimeout   time.Duration // 等人审批的上限（默认 5 分钟）
 	ApprovalOnTimeout string        // 超时动作：deny（默认）| allow
 	ApprovalDisabled  bool          // 显式关闭审批门（默认 false = 开启，规则默认放行）
+	// ApprovalMode 是全局默认审批模式：manual|auto|off（空 = 由 ApprovalDisabled 推导）。
+	ApprovalMode string
 
 	// P3-4：按风险分级的等待预算与超时动作（0 = 用 DefaultTiers）。
 	ApprovalLowSeconds  int
@@ -183,9 +185,18 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 	// planner 的两只手（kill / steer）只能在引擎里实现：它们要摸到 work 的 ctx 与队列。
 	e.planner.KillWork = e.KillWork
 	e.planner.SteerWork = e.SteerWork
-	if !cfg.ApprovalDisabled {
+	mode := cfg.ApprovalMode
+	if mode == "" {
+		if cfg.ApprovalDisabled {
+			mode = "off"
+		} else {
+			mode = "manual"
+		}
+	}
+	if mode != "off" {
 		e.gate = &agent.Gate{
 			Store: st, Timeout: cfg.ApprovalTimeout, OnTimeout: cfg.ApprovalOnTimeout,
+			DefaultMode: mode,
 		}
 		e.gate.Tiers = agent.DefaultTiers()
 		if cfg.ApprovalLowSeconds > 0 || cfg.ApprovalMidSeconds > 0 || cfg.ApprovalHighSeconds > 0 {
@@ -205,9 +216,13 @@ func New(st *store.Store, providers llm.Factory, workerTools, plannerTools *agen
 				id := intentID
 				nodeID = &id
 			}
+			summary := fmt.Sprintf("预授权放行：%s %s（策略 #%d）", tool, target, d.PolicyID)
+			if d.Source == "auto" {
+				summary = fmt.Sprintf("自动审批放行：%s %s（模式 auto）", tool, target)
+			}
 			e.emit(context.WithoutCancel(ctx), &model.Activity{
 				RunID: runID, NodeID: nodeID, Worker: "gate", Kind: model.ActSystem,
-				Summary: fmt.Sprintf("预授权放行：%s %s（策略 #%d）", tool, target, d.PolicyID),
+				Summary: summary,
 				Metadata: map[string]any{
 					"policy_id": d.PolicyID, "tool": tool, "target": target,
 					"source": d.Source, "note": d.Note,

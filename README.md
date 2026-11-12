@@ -157,6 +157,7 @@ pwsh -File scripts/demo/demo-m4.ps1
 | GET/POST | `/api/approval-policies` | 审批策略（预授权须带限速+到期） |
 | POST | `/api/approvals/batch-decide` | 批量批准/拒绝（冲突项不覆盖） |
 | GET | `/api/approval-grants` | 预授权放行审计 |
+| POST | `/api/runs/{id}/approval-mode` | 切换任务级审批模式：`manual` / `auto` / `off` |
 | GET | `/api/runs/{id}/report?format=md\|html\|zip\|json` | 可复现报告（默认脱敏，`full=1` 需授权） |
 | GET | `/api/connectors/deliveries` | 外部集成投递台账 |
 | POST | `/api/runs/{id}/sync-tickets` · `/ci-export` · `/ci-result` | 工单回写 / CI 导出 / 回归回写 |
@@ -198,6 +199,9 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 - **证据门槛**：`fact` 必须有 `evidence`；`finding` 必须有可复现证据，否则只能记 `inferred` 事实。
 - **鉴权（M9）**：HTTP 层默认只监听回环；一旦监听非回环**必须有令牌**（否则拒绝启动）。
   令牌分 `viewer/operator/admin` 三角色，控制台走会话 Cookie + CSRF 双提交；改审批策略必须是 admin。
+- **审批模式（M21）**：默认 `manual`；`auto` 把命中 `ask` 的调用自动放行（`deny` 仍优先）；
+  `off` 跳过整个审批门（含 `deny`），只给受控任务用。全局 `QINYUAN_APPROVAL_MODE`，任务级
+  `approval_mode` 可覆盖；控制台新建/详情页可切换（见 [docs/26-审批模式.md](docs/26-审批模式.md)）。
 - `QINYUAN_ALLOW_LOOPBACK=1` 只在 demo/自测用，它会削弱 SSRF 防护。
 
 > 钦原只应在**获得明确授权**的目标上使用。范围闸门是工具，不是法律许可。
@@ -223,6 +227,7 @@ docs/03-M3.5-….md      目标拆解与差分态势的设计/验收/坑
 | ~~M8~~ ✅ | 控制台补齐：战役页 / 运维页 / 时间线 Tab / 报告包·CI·同步工单 / 批量审批 + P2-4 S3 DTO 迁移（`docs/16`） | 浏览器实测六页；`graphstore` 不再依赖 `store`；146 用例 + `-race` 全绿 |
 | ~~M9~~ ✅ | 鉴权：Bearer 令牌（viewer/operator/admin）+ 会话 Cookie + CSRF + 登录限速 + 非回环必须有鉴权（`docs/17`） | 无凭据 401；viewer 写 403；CSRF 缺失 403；`0.0.0.0` 无令牌拒绝启动；156 用例全绿 |
 | ~~M12~~ ✅ | 任务附件：上传（内容寻址）+ 清单注入 + 只读工具 `list_attachments`/`read_attachment`（`docs/18`） | 附件进态势；agent 只读、无路径参数；逃逸路径被拒 |
+| ~~M21~~ ✅ | 审批模式：`manual` / `auto`（ask 自动放行，deny 仍拦）/ `off`（跳过审批门）；全局 + 任务级（`docs/26`） | 无人值守不再卡 pending；auto 保留 deny；off 有二次确认 |
 
 ---
 

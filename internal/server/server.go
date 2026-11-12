@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs", s.handleListRuns)
 	mux.HandleFunc("POST /api/runs", s.handleCreateRun)
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("POST /api/runs/{id}/approval-mode", s.handleSetRunApprovalMode)
 	mux.HandleFunc("DELETE /api/runs/{id}", s.handleDeleteRun)
 	mux.HandleFunc("POST /api/runs/{id}/control", s.handleControl)
 	mux.HandleFunc("GET /api/runs/{id}/nodes", s.handleNodes)
@@ -224,6 +225,8 @@ type createRunReq struct {
 	Target         string `json:"target"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	WorkerCount    int    `json:"worker_count"`
+	// ApprovalMode：空/inherit=跟随全局；manual/auto/off。
+	ApprovalMode string `json:"approval_mode"`
 }
 
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +241,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	in, err := runplan.Build(runplan.Request{
 		Goal: req.Goal, Description: req.Description, Name: req.Name,
 		Target: req.Target, TimeoutSeconds: req.TimeoutSeconds, WorkerCount: req.WorkerCount,
+		ApprovalMode: req.ApprovalMode,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -578,6 +582,7 @@ func runDTO(ctx context.Context, st *store.Store, run *model.Run) map[string]any
 		out["worker_count"] = run.Task.WorkerCount
 		out["timeout_seconds"] = run.Task.TimeoutSeconds
 		out["goals_at"] = run.Task.GoalsAt
+		out["approval_mode"] = run.Task.ApprovalMode
 	}
 	return out
 }

@@ -60,6 +60,8 @@ type Config struct {
 	ApprovalTimeout   time.Duration // 等人审批的上限
 	ApprovalOnTimeout string        // deny（默认）| allow
 	ApprovalDisabled  bool          // true = 完全关闭审批门（默认 false）
+	// ApprovalMode 是全局默认审批模式：manual（默认）/ auto / off。
+	ApprovalMode string
 
 	// P3-4：按风险分级的等待与超时动作（低/中/高）。
 	// 语义：低风险等到点自动放行；中/高风险到点拒绝并留痕（夜间不卡死，也不放开闸门）。
@@ -355,9 +357,23 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("QINYUAN_APPROVAL_ON_TIMEOUT 非法：%q（deny|allow）", v)
 		}
 	}
-	if v, _ := pick("QINYUAN_APPROVAL_DISABLE", fileVals, ""); v == "1" {
-		c.ApprovalDisabled = true
+	// M21：审批模式。QINYUAN_APPROVAL_MODE 优先；旧的 QINYUAN_APPROVAL_DISABLE=1 等价于 off。
+	if v, _ := pick("QINYUAN_APPROVAL_MODE", fileVals, ""); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "manual", "auto", "off":
+			c.ApprovalMode = strings.ToLower(strings.TrimSpace(v))
+		default:
+			return nil, fmt.Errorf("QINYUAN_APPROVAL_MODE 非法：%q（manual|auto|off）", v)
+		}
 	}
+	if c.ApprovalMode == "" {
+		if v, _ := pick("QINYUAN_APPROVAL_DISABLE", fileVals, ""); v == "1" {
+			c.ApprovalMode = "off"
+		} else {
+			c.ApprovalMode = "manual"
+		}
+	}
+	c.ApprovalDisabled = c.ApprovalMode == "off"
 	// 分级审批（P3-4）：秒数只能在 [5, 3600] 内，动作只认 allow/deny。
 	for _, tier := range []struct {
 		key string

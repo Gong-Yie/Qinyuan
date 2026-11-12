@@ -350,6 +350,10 @@ CREATE INDEX IF NOT EXISTS idx_steps_state ON nodes(run_id, state) WHERE kind = 
 -- ---------------------------------------------------------------------------
 ALTER TABLE run_tasks ADD COLUMN IF NOT EXISTS goals_at BIGINT NOT NULL DEFAULT 0;
 
+-- M21：run 级审批模式。'' = 跟随全局；manual/auto/off 见 internal/model/approval.go。
+ALTER TABLE run_tasks ADD COLUMN IF NOT EXISTS approval_mode TEXT NOT NULL DEFAULT ''
+    CHECK (approval_mode IN ('','manual','auto','off'));
+
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE edges ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0;
 

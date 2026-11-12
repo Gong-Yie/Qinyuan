@@ -31,7 +31,11 @@ func TestWSLDockerIntegration(t *testing.T) {
 	port, _ := strconv.Atoi(portStr)
 	ipStr, dst := resolveTarget(t, host)
 
-	cfg := Config{Distro: os.Getenv("QINYUAN_SANDBOX_DISTRO")}
+	cfg := Config{
+		Distro:    os.Getenv("QINYUAN_SANDBOX_DISTRO"),
+		DataDir:   t.TempDir(),
+		MaxOutput: 1024,
+	}
 	r := NewWSLDocker(cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -80,6 +84,65 @@ PY`, pyHost, pyPort)
 	}
 	if strings.Contains(res.Stdout, "connect-ok") {
 		t.Fatalf("白名单外的连接不该成功：stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+
+	// 4) DNS 默认关闭：Docker resolver 的上游被指向 127.0.0.1，
+	// 没被 --add-host 注入的域名必须解析失败。
+	res, err = r.Run(ctx, Request{RunID: 9001,
+		Command: "getent hosts example.com || echo dns-blocked",
+		Timeout: 30 * time.Second, Allows: allow})
+	if err != nil {
+		t.Fatalf("DNS 负向用例执行失败：%v", err)
+	}
+	if !strings.Contains(res.Stdout, "dns-blocked") {
+		t.Fatalf("DNS 应被关闭，实际 stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+
+	// 5) 容器→宿主也被 INPUT 链挡住：连宿主网关的关闭端口应当超时（curl 28），
+	// 而不是收到宿主 RST（curl 7）。
+	res, err = r.Run(ctx, Request{RunID: 9001,
+		Command: "curl -m 2 -sS http://10.201.0.1:1/ >/dev/null 2>&1; echo rc=$?",
+		Timeout: 30 * time.Second, Allows: allow})
+	if err != nil {
+		t.Fatalf("宿主可达性负向用例执行失败：%v", err)
+	}
+	if !strings.Contains(res.Stdout, "rc=28") {
+		t.Fatalf("容器→宿主应被 DROP（curl 28），实际 stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+
+	// 6) 完整输出落盘 + 指针：head 被截到 1024，但文件里是完整的 5001 字节。
+	res, err = r.Run(ctx, Request{RunID: 9001,
+		Command: `python3 -c 'print("A"*5000)'`,
+		Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("输出落盘用例执行失败：%v", err)
+	}
+	if !res.Truncated || res.StdoutPath == "" {
+		t.Fatalf("应截断并给出落盘路径：%+v", res)
+	}
+	if len(res.Stdout) != cfg.MaxOutput {
+		t.Fatalf("head 长度应为 %d，实际 %d", cfg.MaxOutput, len(res.Stdout))
+	}
+	data, err := os.ReadFile(res.StdoutPath)
+	if err != nil {
+		t.Fatalf("读落盘文件失败：%v", err)
+	}
+	if len(data) != 5001 {
+		t.Fatalf("落盘应为完整 5001 字节，实际 %d", len(data))
+	}
+
+	// 7) 域名可用但 DNS 关闭：Allow.Host 会被写成 --add-host，容器内按域名解析到授权 IP。
+	if _, err := netip.ParseAddr(host); err != nil {
+		withHost := []Allow{{Dst: dst, Proto: "tcp", Ports: Ports{Low: port, High: port}, From: "callback", Host: host}}
+		res, err = r.Run(ctx, Request{RunID: 9001,
+			Command: "getent hosts " + host,
+			Timeout: 30 * time.Second, Allows: withHost})
+		if err != nil {
+			t.Fatalf("--add-host 用例执行失败：%v", err)
+		}
+		if !strings.Contains(res.Stdout, ipStr) {
+			t.Fatalf("域名应通过 /etc/hosts 解析到 %s，实际 stdout=%q stderr=%q", ipStr, res.Stdout, res.Stderr)
+		}
 	}
 }
 

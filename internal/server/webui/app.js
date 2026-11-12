@@ -79,6 +79,9 @@ const STATUS_LABEL = {
 };
 const statusBadge = (st) => `<span class="badge badge-${st === 'created' ? 'idle' : st || 'idle'}">${STATUS_LABEL[st] || st || '未知'}</span>`;
 
+const APPROVAL_LABEL = { '': '跟随全局', manual: '人工', auto: '自动', off: '无审批' };
+const approvalLabel = (m) => APPROVAL_LABEL[m || ''] || m;
+
 async function api(path, init) {
   init = init || {};
   const method = String(init.method || 'GET').toUpperCase();
@@ -519,7 +522,9 @@ async function createRun() {
     name: $('nt-name').value.trim(),
     worker_count: Number($('nt-workers').value) || 2,
     timeout_seconds: Number($('nt-timeout').value) || 0,
+    approval_mode: $('nt-approval').value,
   };
+  if (body.approval_mode === 'off' && !window.confirm('无审批模式会跳过整个审批门（包括 deny 规则）。确认创建？')) return;
   const files = $('nt-files') ? $('nt-files').files : null;
   try {
     const run = await api('/api/runs', {
@@ -527,7 +532,7 @@ async function createRun() {
     });
     closeNewTask();
     // 清空输入，下次打开是干净的（但只在成功后才清）。
-    ['nt-goal', 'nt-target', 'nt-name', 'nt-timeout'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
+    ['nt-goal', 'nt-target', 'nt-name', 'nt-timeout', 'nt-approval'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
     // 附件要在启动之前传：这样第 0 轮拆解就能看到附件清单。
     if (files && files.length) {
       try {
@@ -581,6 +586,7 @@ async function renderRun() {
             <span>轮次 <b>${run.round ?? 0}</b></span>
             <span>工作线程 <b>${run.worker_count ?? '—'}</b></span>
             <span>超时 <b>${run.timeout_seconds ? run.timeout_seconds + 's' : '不限'}</b></span>
+            <span>审批 <b>${approvalLabel(run.approval_mode || '')}</b></span>
             <span>创建 <b>${fmtDate(run.created_at)}</b></span>
           </div>
           <div class="detail-actions">
@@ -599,9 +605,7 @@ async function renderRun() {
     if (!b) return;
     location.hash = `#/runs/${id}/${b.dataset.tab}`;
   });
-  document.querySelectorAll('.detail-actions [data-act]').forEach((b) => {
-    b.addEventListener('click', () => control(id, b.dataset.act));
-  });
+  wireRunActions(id);
 
   await drawTab(id, tab);
 
@@ -619,10 +623,11 @@ async function renderRun() {
           <span>轮次 <b>${r.round ?? 0}</b></span>
           <span>工作线程 <b>${r.worker_count ?? '—'}</b></span>
           <span>超时 <b>${r.timeout_seconds ? r.timeout_seconds + 's' : '不限'}</b></span>
+          <span>审批 <b>${approvalLabel(r.approval_mode || '')}</b></span>
           <span>创建 <b>${fmtDate(r.created_at)}</b></span>`;
         const acts = head.querySelector('.detail-actions');
         acts.innerHTML = runActions(r, id);
-        acts.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => control(id, b.dataset.act)));
+        wireRunActions(id);
       }
       if (S.route.tab !== 'sessions') await drawTab(id, S.route.tab);
     } catch { /* 忽略单次失败 */ }
@@ -1330,7 +1335,12 @@ function openDrawerRaw(title, text) {
 /* ── M8：时间线 / 战役 / 运维 ───────────────────────── */
 
 function runActions(run, id) {
-  return `${run.can_start ? '<button class="btn btn-primary" data-act="start">启动</button>' : ''}
+  const mode = run.approval_mode || '';
+  const opt = (v, label) => `<option value="${v}"${mode === v ? ' selected' : ''}>${label}</option>`;
+  return `<select class="search" data-approval-mode title="审批模式（切换后立即生效）" style="max-width:170px">
+      ${opt('', '审批：跟随全局')}${opt('manual', '审批：人工')}${opt('auto', '审批：自动')}${opt('off', '审批：无')}
+    </select>
+    ${run.can_start ? '<button class="btn btn-primary" data-act="start">启动</button>' : ''}
     ${run.can_pause ? '<button class="btn" data-act="pause">暂停</button>' : ''}
     ${run.can_resume ? '<button class="btn" data-act="resume">恢复</button>' : ''}
     <a class="btn btn-ghost" target="_blank" rel="noopener" href="/api/runs/${id}/report">报告 MD</a>
@@ -1339,6 +1349,32 @@ function runActions(run, id) {
     <button class="btn btn-ghost" data-act="ci">CI 导出</button>
     <button class="btn btn-ghost" data-act="sync">同步工单</button>
     <a class="btn btn-ghost" href="#/runs">返回列表</a>`;
+}
+
+function wireRunActions(id) {
+  document.querySelectorAll('.detail-actions [data-act]').forEach((b) => {
+    b.addEventListener('click', () => control(id, b.dataset.act));
+  });
+  document.querySelectorAll('.detail-actions [data-approval-mode]').forEach((sel) => {
+    sel.addEventListener('change', async () => {
+      if (sel.value === 'off' && !window.confirm('无审批模式会跳过整个审批门（包括 deny 规则）。确认切换？')) {
+        sel.value = (S.run && S.run.approval_mode) || '';
+        return;
+      }
+      try {
+        const r = await api(`/api/runs/${id}/approval-mode`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: sel.value }),
+        });
+        toast(`审批模式：${approvalLabel(sel.value)}${r.approved_pending ? `（放行 ${r.approved_pending} 条待审批）` : ''}`);
+        await pollGlobal();
+        if (S.refresh) await S.refresh();
+      } catch (e) {
+        toast('切换失败：' + e.message);
+        if (S.run) sel.value = S.run.approval_mode || '';
+      }
+    });
+  });
 }
 
 const CAMP_LABEL = { active: '进行中', paused: '已暂停', done: '已完成', archived: '已归档' };

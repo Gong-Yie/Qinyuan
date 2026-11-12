@@ -79,7 +79,7 @@ func callbackAllows(ctx context.Context, cb *model.Callback) []sandbox.Allow {
 
 // hostAllows 把主机名解析成 IP 前缀（最多 8 个，避免 DNS 返回一大串）。
 func hostAllows(ctx context.Context, host, proto string, ports sandbox.Ports, from string) []sandbox.Allow {
-	host = strings.TrimSpace(host)
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 	if host == "" {
 		return nil
 	}
@@ -97,7 +97,10 @@ func hostAllows(ctx context.Context, host, proto string, ports sandbox.Ports, fr
 		if i >= 8 {
 			break
 		}
-		out = append(out, sandbox.Allow{Dst: netip.PrefixFrom(a, a.BitLen()), Proto: proto, Ports: ports, From: from})
+		out = append(out, sandbox.Allow{
+			Dst: netip.PrefixFrom(a, a.BitLen()), Proto: proto, Ports: ports,
+			From: from, Host: host,
+		})
 	}
 	return out
 }

@@ -25,3 +25,8 @@
 .vscode/
 *.swp
 .DS_Store
+
+# 开发文档只留本地：设计稿/里程碑/交接不随代码仓库走。
+# 注意：已被跟踪的旧文件不会被 ignore 追溯；要从远端移除需 git rm --cached。
+/docs/
+/HANDOFF.md

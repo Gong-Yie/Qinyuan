@@ -42,3 +42,17 @@ func TestBuildWithoutURLHasNoSeeds(t *testing.T) {
 		t.Fatalf("Seeds = %#v，期望为空（裸域名不猜协议）", in.Seeds)
 	}
 }
+
+// M21：审批模式随建 run 一起进 CreateRunInput；非法值在入口就拒绝。
+func TestBuildApprovalMode(t *testing.T) {
+	in, err := Build(Request{Goal: "审批模式", ApprovalMode: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.ApprovalMode != "auto" {
+		t.Fatalf("ApprovalMode = %q，期望 auto", in.ApprovalMode)
+	}
+	if _, err := Build(Request{Goal: "审批模式", ApprovalMode: "bypass"}); err == nil {
+		t.Fatal("非法审批模式应报错")
+	}
+}

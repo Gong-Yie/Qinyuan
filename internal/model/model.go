@@ -96,16 +96,16 @@ type Run struct {
 	Description string
 	// Seeds 用户给的入口 URL（可能有端口/路径）。与范围不是一回事：
 	// 范围回答"允许打哪"，seeds 回答"从哪开始"。
-	Seeds     []string
-	Status    string
-	RoundNo   int64
-	Version   int64
+	Seeds   []string
+	Status  string
+	RoundNo int64
+	Version int64
 	// CampaignID / CampaignRole：这个 run 属于哪个战役、负责哪一块（0/空 = 独立任务）。
 	CampaignID   int64
 	CampaignRole string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Task      *Task
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	Task         *Task
 }
 
 // Task run 的业务状态（run_tasks 表）。
@@ -122,6 +122,8 @@ type Task struct {
 	HeartbeatSeconds int
 	WorkerCount      int
 	CompletedAt      int64
+	// ApprovalMode 是 run 级审批模式：空 = 跟随全局，manual/auto/off 见 approval.go。
+	ApprovalMode string
 	// GoalsAt 是第 0 轮目标拆解完成时刻（unix 秒；0 = 还没拆过）。
 	// 拆解失败不写这个标记，下一轮会重试，此时 seed 目标兜底。
 	GoalsAt int64

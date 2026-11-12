@@ -19,7 +19,9 @@ type CreateRunInput struct {
 	Name           string
 	TimeoutSeconds int
 	WorkerCount    int
-	Scopes         []model.Scope
+	// ApprovalMode 是 run 级审批模式：空 = 跟随全局；manual/auto/off。
+	ApprovalMode string
+	Scopes       []model.Scope
 	// Seeds 入口 URL（openai 归一化后传）。只存范围会丢端口，worker 就只能猜。
 	Seeds []string
 	// SeedEntities 由调用方归一化后再传（store 不做领域归一化）。
@@ -35,6 +37,10 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 	}
 	if in.WorkerCount <= 0 {
 		in.WorkerCount = 2
+	}
+	approvalMode, ok := model.NormalizeApprovalMode(in.ApprovalMode)
+	if !ok {
+		return nil, errors.New("approval_mode 只能是 manual/auto/off/inherit")
 	}
 	seeds := in.Seeds
 	if seeds == nil {
@@ -54,9 +60,9 @@ func (s *Store) CreateRun(ctx context.Context, in CreateRunInput) (*model.Run, e
 		return nil, fmt.Errorf("建 run 失败：%w", err)
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO run_tasks (run_id, name, status, timeout_seconds, worker_count)
-		 VALUES ($1, $2, 'created', $3, $4)`,
-		runID, nullIfEmpty(in.Name), in.TimeoutSeconds, in.WorkerCount); err != nil {
+		`INSERT INTO run_tasks (run_id, name, status, timeout_seconds, worker_count, approval_mode)
+		 VALUES ($1, $2, 'created', $3, $4, $5)`,
+		runID, nullIfEmpty(in.Name), in.TimeoutSeconds, in.WorkerCount, approvalMode); err != nil {
 		return nil, fmt.Errorf("建 run_tasks 失败：%w", err)
 	}
 
@@ -141,7 +147,7 @@ func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 		       COALESCE(r.campaign_id,0), r.campaign_role,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
 		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
-		       t.goals_at
+		       t.goals_at, t.approval_mode
 		  FROM runs r LEFT JOIN run_tasks t ON t.run_id = r.id
 		 WHERE r.id = $1`, id)
 
@@ -154,7 +160,7 @@ func (s *Store) Run(ctx context.Context, id int64) (*model.Run, error) {
 		&r.CampaignID, &r.CampaignRole,
 		&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
 		&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
-		&t.GoalsAt)
+		&t.GoalsAt, &t.ApprovalMode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -184,7 +190,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 		       COALESCE(r.campaign_id,0), r.campaign_role,
 		       t.run_id, COALESCE(t.name,''), t.status, t.paused, t.queued, COALESCE(t.queued_at,0),
 		       t.timeout_seconds, t.first_run_at, t.deadline_at, t.heartbeat_seconds, t.worker_count, t.completed_at,
-		       t.goals_at
+		       t.goals_at, t.approval_mode
 		  FROM runs r LEFT JOIN run_tasks t ON t.run_id = r.id
 		 ORDER BY r.id DESC LIMIT $1`, limit)
 	if err != nil {
@@ -202,7 +208,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]*model.Run, error) {
 			&r.CampaignID, &r.CampaignRole,
 			&runID, &name, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt,
 			&t.TimeoutSeconds, &t.FirstRunAt, &t.DeadlineAt, &t.HeartbeatSeconds, &t.WorkerCount, &t.CompletedAt,
-			&t.GoalsAt); err != nil {
+			&t.GoalsAt, &t.ApprovalMode); err != nil {
 			return nil, err
 		}
 		if desc != nil {

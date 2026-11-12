@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,11 +134,9 @@ func validatePorts(ports string) error {
 	ports = strings.TrimSpace(ports)
 	parts := strings.SplitN(ports, "-", 2)
 	parse := func(s string) (int, error) {
-		var n int
-		if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &n); err != nil {
-			return 0, err
-		}
-		return n, nil
+		// 必须整段都是数字：Sscanf("%d") 会接受 "4444abc"（只读前缀），
+		// 于是 API 创建成功、sandbox.ParsePorts 却拒绝，白名单静默不生效。
+		return strconv.Atoi(strings.TrimSpace(s))
 	}
 	low, err := parse(parts[0])
 	if err != nil || low < 1 || low > 65535 {

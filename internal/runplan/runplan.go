@@ -23,6 +23,8 @@ type Request struct {
 	Target         string
 	TimeoutSeconds int
 	WorkerCount    int
+	// ApprovalMode 是 run 级审批模式：空/inherit = 跟随全局；manual/auto/off。
+	ApprovalMode string
 }
 
 // Build 生成 CreateRunInput。
@@ -40,6 +42,11 @@ func Build(in Request) (store.CreateRunInput, error) {
 		TimeoutSeconds: in.TimeoutSeconds,
 		WorkerCount:    in.WorkerCount,
 	}
+	mode, ok := model.NormalizeApprovalMode(in.ApprovalMode)
+	if !ok {
+		return out, fmt.Errorf("approval_mode 只能是 manual/auto/off/inherit")
+	}
+	out.ApprovalMode = mode
 	if out.Goal == "" {
 		return out, fmt.Errorf("goal 不能为空")
 	}

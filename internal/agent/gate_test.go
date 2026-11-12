@@ -170,3 +170,84 @@ func TestGateNormalizesDefaultHTTPMethod(t *testing.T) {
 		t.Fatal("没有挂起审批")
 	}
 }
+
+// auto：命中 ask 不挂起，直接放行，但必须留下"auto 批准"的审计行。
+func TestGateAutoApprovesAsk(t *testing.T) {
+	st := testkit.Store(t)
+	run := gateRun(t, st)
+	if _, err := st.CreateInterceptRule(context.Background(), store.InterceptRule{
+		Priority: 800, MatchTool: "demo_tool", Decision: "ask", Note: "auto 测试", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g := &Gate{Store: st, DefaultMode: "auto"}
+	ok, msg := g.Check(context.Background(), run.ID, 0, "demo_tool", "call_auto",
+		json.RawMessage(`{}`), nil)
+	if !ok {
+		t.Fatalf("auto 模式应放行，实际被拦：%s", msg)
+	}
+	rows, err := st.ListApprovals(context.Background(), "allowed", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range rows {
+		if p.Tool == "demo_tool" && p.DecidedBy == "auto" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("auto 放行应留审计行：%+v", rows)
+	}
+}
+
+// auto 只治理"等人"，不放过 deny：显式拒绝永远优先。
+func TestGateAutoStillHonorsDeny(t *testing.T) {
+	st := testkit.Store(t)
+	run := gateRun(t, st)
+	if _, err := st.CreateInterceptRule(context.Background(), store.InterceptRule{
+		Priority: 900, MatchTool: "demo_tool", Decision: "deny", Note: "不许", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g := &Gate{Store: st, DefaultMode: "auto"}
+	if ok, _ := g.Check(context.Background(), run.ID, 0, "demo_tool", "call_deny",
+		json.RawMessage(`{}`), nil); ok {
+		t.Fatal("auto 模式也不能绕过 deny")
+	}
+}
+
+// off：整个门跳过（包括 deny），是 operator 显式选择的"无审批"。
+func TestGateOffBypassesDeny(t *testing.T) {
+	st := testkit.Store(t)
+	run := gateRun(t, st)
+	if _, err := st.CreateInterceptRule(context.Background(), store.InterceptRule{
+		Priority: 900, MatchTool: "demo_tool", Decision: "deny", Note: "不许", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g := &Gate{Store: st, DefaultMode: "off"}
+	if ok, msg := g.Check(context.Background(), run.ID, 0, "demo_tool", "call_off",
+		json.RawMessage(`{}`), nil); !ok {
+		t.Fatalf("off 模式应跳过审批门，实际被拦：%s", msg)
+	}
+}
+
+// run 级模式覆盖全局默认：全局 manual，run=auto 时 ask 自动放行。
+func TestGateRunModeOverridesDefault(t *testing.T) {
+	st := testkit.Store(t)
+	run := gateRun(t, st)
+	if _, err := st.SetRunApprovalMode(context.Background(), run.ID, "auto"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateInterceptRule(context.Background(), store.InterceptRule{
+		Priority: 800, MatchTool: "demo_tool", Decision: "ask", Note: "run auto", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g := &Gate{Store: st, DefaultMode: "manual"}
+	if ok, msg := g.Check(context.Background(), run.ID, 0, "demo_tool", "call_run",
+		json.RawMessage(`{}`), nil); !ok {
+		t.Fatalf("run 级 auto 应覆盖全局 manual，实际被拦：%s", msg)
+	}
+}

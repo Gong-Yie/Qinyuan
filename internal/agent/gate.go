@@ -30,6 +30,8 @@ type Gate struct {
 
 	// Tiers 是按风险分级的等待预算与超时动作（P3-4）。零值走默认。
 	Tiers TierPolicy
+	// DefaultMode 是全局默认审批模式（manual|auto|off）；run 级 approval_mode 为空时用它。
+	DefaultMode string
 
 	// Audit 在"预授权放行"时回调一次（引擎注入 → 写一条 activity）。
 	// 这是审计的要求：每条不需人工就放行的调用都要能查到。
@@ -140,6 +142,11 @@ func (g *Gate) Check(ctx context.Context, runID, intentID int64, tool, toolUseID
 	if g == nil || g.Store == nil {
 		return true, ""
 	}
+	mode := g.modeFor(ctx, runID)
+	// off：整个审批门跳过（包括 deny），只给 operator 在受控任务上用。
+	if mode == "off" {
+		return true, ""
+	}
 	norm := normalizeToolInput(tool, input)
 	target := targetOf(tool, input)
 
@@ -163,8 +170,40 @@ func (g *Gate) Check(ctx context.Context, runID, intentID int64, tool, toolUseID
 		return false, RefusedText(tool, firstNonEmptyStr(d.Note, "命中拒绝策略"))
 	}
 
-	// ask：挂起等人工
+	// ask：auto 模式直接放行（留审计）；manual 仍然挂起等人工。
+	if mode == "auto" {
+		reason := "审批模式=auto，自动放行"
+		if d.Note != "" {
+			reason = "自动审批放行（" + d.Note + "）"
+		}
+		// 审计行写失败不阻塞自动化；工具调用已经允许。
+		_ = g.Store.RecordAutoApproval(ctx, runID, intentID, tool, toolUseID, norm, reason)
+		if g.Audit != nil {
+			g.Audit(ctx, runID, intentID, &store.ApprovalDecision{
+				Action: "allow", Source: "auto", Note: reason,
+			}, tool, target)
+		}
+		return true, ""
+	}
 	return g.ask(ctx, runID, intentID, tool, toolUseID, input, norm, d, onAsk)
+}
+
+// modeFor 取 run 级模式；空/非法/读不到时回落到全局默认，最后兜底 manual。
+func (g *Gate) modeFor(ctx context.Context, runID int64) string {
+	if g.Store != nil {
+		if m, err := g.Store.RunApprovalMode(ctx, runID); err == nil {
+			switch m {
+			case "manual", "auto", "off":
+				return m
+			}
+		}
+	}
+	switch g.DefaultMode {
+	case "manual", "auto", "off":
+		return g.DefaultMode
+	default:
+		return "manual"
+	}
 }
 
 func (g *Gate) ask(ctx context.Context, runID, intentID int64, tool, toolUseID string,
@@ -299,5 +338,3 @@ func (g *Gate) scopeChecker(ctx context.Context, runID int64, target string) fun
 		return false
 	}
 }
-
-

@@ -106,6 +106,14 @@
       <label style="flex:0 0 170px">超时（秒，0=不限）
         <input id="nt-timeout" class="search" type="number" min="0" placeholder="480" />
       </label>
+      <label style="flex:0 0 190px">审批模式
+        <select id="nt-approval" class="search">
+          <option value="">跟随全局</option>
+          <option value="manual">人工审批</option>
+          <option value="auto">自动审批（deny 仍拦）</option>
+          <option value="off">无审批（跳过门）</option>
+        </select>
+      </label>
     </div>
     <label>任务名（可选）
       <input id="nt-name" class="search" placeholder="CTF-AcmeNotes" />
